@@ -20,6 +20,7 @@ def load_text_data(directory):
                 text += content + "\n" # Add newline between files
             except Exception as e:
                 print(f"Error reading {path}: {e}")
+    print(f"Read {len(text)} characters of text.")
     return text
 
 class Tokenizer:
@@ -47,49 +48,54 @@ class DataLoader:
         self.batch_size = batch_size
         self.device = device
         
-        if os.path.isdir(cache_dir) is False:
-            print(f"cache_dir {cache_dir} is not a directory")
-            cache_dir = None
-        cache_file = None
-        meta = {}
-        if cache_dir is not None:
-            cache_meta = os.path.join(cache_dir, "dataset_cache_metadata.json")
-            if os.path.exists(cache_meta) is True:
-                with open(cache_meta, 'r') as f:
-                    try:
-                        meta = json.load(f)
-                    except:
-                        meta = {'dataset_size': -1 }
-                        print(f"Invalid metadata in {cache_meta}")
-                    if 'dataset_size' in meta and meta['dataset_size'] == len(text):    
-                        cache_file = os.path.join(cache_dir, "dataset_cache.pt")
-                    else:
-                        print("Dataset has changed or is invalid, invalidating cache")
-
-        cached_data = False
-        if cache_file is not None and os.path.exists(cache_file):
-            try:
-                data = torch.load(cache_file)
-                cached_data = True
-            except:
-                pass
-        if cached_data is False:
-            # Encode the entire text
-            print("Encoding text data (this might take a moment)...")
-            # Use numpy for efficient storage before tensor conversion
-            encoded = self.tokenizer.encode(text)
-            data = torch.tensor(encoded, dtype=torch.long)
-            print(f"Encoded {len(data)} tokens.")
-            if cache_dir is not None and os.path.isdir(cache_dir):
+        if tokenizer is not None:
+            if os.path.isdir(cache_dir) is False:
+                print(f"cache_dir {cache_dir} is not a directory")
+                cache_dir = None
+            cache_file = None
+            meta = {}
+            if cache_dir is not None:
                 cache_meta = os.path.join(cache_dir, "dataset_cache_metadata.json")
-                cache_file = os.path.join(cache_dir, "dataset_cache.pt")
-                torch.save(data, cache_file)
-                meta = {'dataset_size': len(text)}
-                with open(cache_meta, 'w') as f:
-                    json.dump(meta, f)
-                print(f"Encoded data saved to {cache_file}, metadata to {cache_meta}")
+                if os.path.exists(cache_meta) is True:
+                    with open(cache_meta, 'r') as f:
+                        try:
+                            meta = json.load(f)
+                        except:
+                            meta = {'dataset_size': -1 }
+                            print(f"Invalid metadata in {cache_meta}")
+                        if 'dataset_size' in meta and meta['dataset_size'] == len(text):    
+                            cache_file = os.path.join(cache_dir, "dataset_cache.pt")
+                        else:
+                            print("Dataset has changed or is invalid, invalidating cache")
+
+            cached_data = False
+            if cache_file is not None and os.path.exists(cache_file):
+                try:
+                    data = torch.load(cache_file)
+                    cached_data = True
+                except:
+                    pass
+            if cached_data is False:
+                # Encode the entire text
+                print("Encoding text data (this might take a moment)...")
+                # Use numpy for efficient storage before tensor conversion
+                encoded = self.tokenizer.encode(text)
+                data = torch.tensor(encoded, dtype=torch.long)
+                print(f"Encoded {len(data)} tokens.")
+                if cache_dir is not None and os.path.isdir(cache_dir):
+                    cache_meta = os.path.join(cache_dir, "dataset_cache_metadata.json")
+                    cache_file = os.path.join(cache_dir, "dataset_cache.pt")
+                    torch.save(data, cache_file)
+                    meta = {'dataset_size': len(text)}
+                    with open(cache_meta, 'w') as f:
+                        json.dump(meta, f)
+                    print(f"Encoded data saved to {cache_file}, metadata to {cache_meta}")
+            else:
+                print(f"Encoded data loaded from cache file {cache_file}")
         else:
-            print(f"Encoded data loaded from cache file {cache_file}")
+            array = bytearray(text, 'utf-8')
+            data = torch.tensor(array, dtype=torch.long)
+            print(f"Byte array data shape: {data.shape}")
         
         # Split into train and validation
         n = int(train_split * len(data))

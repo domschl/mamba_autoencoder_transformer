@@ -5,6 +5,78 @@ from torch.nn import functional as F
 import math
 import random
 
+
+class ConvByteCompressor(nn.Module):
+    def __init__(self, d_model=512, ic=64, oc=128, compression_rate=4):
+        super().__init__()
+        self.ic = ic
+        self.oc = oc
+        # 1. Raw Byte Embedding: 256 possible byte values + 1 for padding
+        self.byte_embedding = nn.Embedding(256, ic)
+        
+        # 2. Convolutional Stem: This replaces the tokenizer's compression
+        # We use a stride equal to the compression rate to shorten the sequence
+        self.conv1 = nn.Conv1d(in_channels=ic, out_channels=oc, kernel_size=3, padding=1)
+        self.relu1 = nn.ReLU()
+        self.conv2 = nn.Conv1d(in_channels=oc, out_channels=d_model, 
+                      kernel_size=compression_rate, 
+                      stride=compression_rate) # Key 'compression' step
+        self.relu2 = nn.ReLU()
+        self.ln = nn.LayerNorm(d_model)
+
+    def forward(self, byte_ids):
+        # byte_ids shape: [batch, seq_len]
+        x = self.byte_embedding(byte_ids) # [batch, seq_len, self.ic]
+        
+        # Conv1d expects [batch, channels, length]
+        x = x.transpose(1, 2) 
+        
+        # Compress the sequence length by 'compression_rate'
+        x = self.conv1(x)
+        x = self.relu1(x)
+        x = self.conv2(x)
+        x = self.relu2(x)
+        x = self.ln(x.transpose(1, 2))
+        
+        # Return to Transformer-ready shape: [batch, compressed_len, d_model]
+        return x
+
+
+class ConvByteDecompressor(nn.Module):
+    def __init__(self, d_model=512, ic=64, oc=128, vocab_size=256, compression_rate=4):
+        super().__init__()
+        # 1. Upsample the sequence length back to original
+        # If input is [B, T/4, d_model], we want [B, T, 128]
+        self.deconv1 = nn.ConvTranspose1d(in_channels=d_model, out_channels=oc, 
+                                        kernel_size=compression_rate, 
+                                        stride=compression_rate)
+        self.relu1 = nn.ReLU()
+        # 2. Refine the sequence
+        self.conv_refine = nn.Conv1d(in_channels=oc, out_channels=ic, kernel_size=3, padding=1)
+        self.relu2 = nn.ReLU()
+        # 3. Project to byte vocabulary
+        self.lm_head = nn.Linear(ic, vocab_size)
+
+    def forward(self, x):
+        # x shape: [batch, compressed_len, d_model]
+        x = x.transpose(1, 2) # [batch, d_model, compressed_len]
+        
+        # Decompress length
+        x = self.deconv1(x) # [batch, oc, original_len]
+        x = self.relu1(x)
+        
+        # Refine channels
+        x = self.conv_refine(x) # [batch, ic, original_len]
+        x = self.relu2(x)
+        
+        # Final head expects [batch, original_len, ic]
+        x = x.transpose(1, 2)
+        logits = self.lm_head(x) # [batch, original_len, vocab_size]
+        
+        return logits
+
+
+
 class Head(nn.Module):
     """ one head of self-attention """
 
@@ -109,29 +181,46 @@ class Block(nn.Module):
 
 class GPT(nn.Module):
 
-    def __init__(self, vocab_size, n_embd, block_size, n_head, n_layer, dropout, device):
+    def __init__(self, vocab_size, n_embd, block_size, n_head, n_layer, dropout, device, use_conv_compressor=False, compression_rate=4):
         super().__init__()
         self.device = device
         self.block_size = block_size
             
         # each token directly reads off the logits for the next token from a lookup table
-        self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
+        self.use_conv_compressor = use_conv_compressor
+        if use_conv_compressor:
+            self.ic = 256 # 64
+            self.oc = 512 # 128
+            self.compressor = ConvByteCompressor(d_model=n_embd, ic=self.ic, oc=self.oc, compression_rate=compression_rate)
+            self.decompressor = ConvByteDecompressor(d_model=n_embd, vocab_size=vocab_size, ic=self.ic, oc=self.oc, compression_rate=compression_rate)
+        else:
+            self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
+            self.lm_head = nn.Linear(n_embd, vocab_size)
         self.positional_encoding_table = nn.Embedding(block_size, n_embd)
         self.blocks = nn.ModuleList([Block(n_embd, n_head, block_size, dropout) for i in range(n_layer)])
         self.ln_f = nn.LayerNorm(n_embd) # final layer norm
-        self.lm_head = nn.Linear(n_embd, vocab_size)
 
     def forward(self, idx, targets=None):
         B, T = idx.shape
 
         # idx and targets are both (B,T) tensor of integers
-        tok_emb = self.token_embedding_table(idx) # (B,T,C)
-        pos_emb = self.positional_encoding_table(torch.arange(T, device=self.device)) # (T,C)
-        x = tok_emb + pos_emb # (B,T,C)
+        if self.use_conv_compressor:
+            x = self.compressor(idx)
+            B, T_compressed, C = x.shape
+            pos_emb = self.positional_encoding_table(torch.arange(T_compressed, device=self.device)) # (T,C)
+            x = x + pos_emb # (B, compressed_T, n_embd)
+        else:
+            pos_emb = self.positional_encoding_table(torch.arange(T, device=self.device)) # (T,C)
+            tok_emb = self.token_embedding_table(idx) # (B,T,C)
+            x = tok_emb + pos_emb # (B,T,C)
         for block in self.blocks:
             x = block(x)
-        x = self.ln_f(x) # (B,T,C)
-        logits = self.lm_head(x) # (B,T,vocab_size)
+        x = self.ln_f(x) # (B, T_compressed or T, C)
+
+        if self.use_conv_compressor:
+            logits = self.decompressor(x) # (B, T, vocab_size)
+        else:
+            logits = self.lm_head(x) # (B, T, vocab_size)
 
         if targets is None:
             loss = None
@@ -163,3 +252,47 @@ class GPT(nn.Module):
             # append sampled index to the running sequence
             idx = torch.cat((idx, idx_next), dim=1) # (B, T+1)
         return idx
+
+
+def print_model_summary(model):
+    """
+    Prints a detailed summary of the model layers and their parameters.
+    """
+    print("\n" + "="*80)
+    print(f"{'Layer (type)':<30} {'Output Shape':<25} {'Param #'}")
+    print("-" * 80)
+    
+    total_params = 0
+    trainable_params = 0
+    
+    # We use named_modules to get a flat list of layers
+    # But we only want to print layers that have parameters or are interesting (like activation/norm)
+    for name, module in model.named_modules():
+        # Only print leaf modules (modules with no children) to avoid double counting
+        if len(list(module.children())) == 0:
+            layer_params = sum(p.numel() for p in module.parameters())
+            total_params += layer_params
+            if any(p.requires_grad for p in module.parameters()):
+                trainable_params += layer_params
+            
+            # Try to get some info about the layer
+            info = ""
+            if isinstance(module, nn.Linear):
+                info = f"in={module.in_features}, out={module.out_features}"
+            elif isinstance(module, nn.Conv1d):
+                info = f"in={module.in_channels}, out={module.out_channels}, k={module.kernel_size}, s={module.stride}"
+            elif isinstance(module, nn.ConvTranspose1d):
+                info = f"in={module.in_channels}, out={module.out_channels}, k={module.kernel_size}, s={module.stride}"
+            elif isinstance(module, nn.Embedding):
+                info = f"num={module.num_embeddings}, d={module.embedding_dim}"
+            elif isinstance(module, nn.LayerNorm):
+                info = f"shape={module.normalized_shape}"
+            
+            class_name = module.__class__.__name__
+            print(f"{name:<30} {class_name:<25} {layer_params:,} {info}")
+
+    print("=" * 80)
+    print(f"Total params: {total_params:,}")
+    print(f"Trainable params: {trainable_params:,}")
+    print(f"Non-trainable params: {total_params - trainable_params:,}")
+    print("=" * 80 + "\n")
