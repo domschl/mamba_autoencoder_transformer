@@ -7,18 +7,18 @@ from data_loader import load_text_data, Tokenizer, DataLoader
 from model import GPT
 
 # Hyperparameters
-batch_size = 32 # how many independent sequences will we process in parallel?
+batch_size = 64 # how many independent sequences will we process in parallel?
 block_size = 128 # what is the maximum context length for predictions?
 max_iters = 100000
-eval_interval = 500
-learning_rate = 1e-5
+eval_interval = 200
+learning_rate = 4e-4
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 if torch.backends.mps.is_available():
     device = 'mps'
-eval_iters = 100
-n_embd = 384
-n_head = 16
-n_layer = 24
+eval_iters = 50
+n_embd = 256
+n_head = 8  
+n_layer = 4
 dropout = 0.1
 
 torch.manual_seed(1337)
@@ -95,5 +95,7 @@ for iter in range(max_iters):
     optimizer.zero_grad(set_to_none=True)
     loss.backward()
     optimizer.step()
+    print(f"\rstep {iter}: train loss {loss.item():.4f}", end="")
 
+print()
 print(f"Training finished in {time.time() - start_time:.2f} seconds")
