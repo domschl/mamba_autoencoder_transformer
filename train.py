@@ -7,7 +7,7 @@ from data_loader import load_text_data, Tokenizer, DataLoader
 from model import GPT, print_model_summary
 
 # Hyperparameters
-batch_size = 64 # how many independent sequences will we process in parallel?
+batch_size = 256 # how many independent sequences will we process in parallel?
 block_size = 256 # what is the maximum context length for predictions?
 max_iters = 100000
 eval_interval = 512
@@ -16,11 +16,12 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 if torch.backends.mps.is_available():
     device = 'mps'
 eval_iters = 50
-n_embd = 1024
+n_embd = 256
 n_head = 16
-n_layer = 12
-dropout = 0.3
+n_layer = 4
+dropout = 0.1
 use_conv_compressor = True
+compression_rate = 2
 
 torch.manual_seed(1337)
 random.seed(1337)
@@ -43,7 +44,7 @@ else:
 train_loader = DataLoader(text, tokenizer, block_size, batch_size, device, cache_dir=dataset_dir, train_split=0.9)
 
 # Model
-model = GPT(vocab_size, n_embd, block_size, n_head, n_layer, dropout, device, use_conv_compressor)
+model = GPT(vocab_size, n_embd, block_size, n_head, n_layer, dropout, device, use_conv_compressor, compression_rate)
 m = model.to(device)
 
 # print_model_summary(m)
@@ -68,6 +69,7 @@ def estimate_loss():
 # Training loop
 print("Starting training...")
 start_time = time.time()
+mean_loss:None|float = None
 
 for iter in range(max_iters):
 
@@ -84,7 +86,7 @@ for iter in range(max_iters):
 
         # Generate sample
         if use_conv_compressor:
-            context = torch.zeros((1, 4), dtype=torch.long, device=device)
+            context = torch.tensor([[32,32,32,32]], dtype=torch.long, device=device)
         else:
             context = torch.zeros((1, 1), dtype=torch.long, device=device)
         for temperature in [0.6, 0.8, 1.0, 1.2]:
@@ -106,7 +108,11 @@ for iter in range(max_iters):
     optimizer.zero_grad(set_to_none=True)
     loss.backward()
     optimizer.step()
-    print(f"\rstep {iter}: train loss {loss.item():.4f}", end="")
+    if mean_loss is None:
+        mean_loss = loss.item()
+    else:
+        mean_loss = (mean_loss * 9 + loss.item()) / 10.0
+    print(f"\rstep {iter}: train loss {mean_loss:.4f}", end="")
 
 print()
 print(f"Training finished in {time.time() - start_time:.2f} seconds")
