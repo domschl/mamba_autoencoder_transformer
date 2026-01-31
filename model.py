@@ -20,22 +20,54 @@ class CausalConv1d(nn.Module):
         return self.conv(x)
 
 
+class ResidualCausalConvBlock(nn.Module):
+    def __init__(self, channels, kernel_size=3):
+        super().__init__()
+        self.conv1 = CausalConv1d(channels, channels, kernel_size)
+        self.relu1 = nn.ReLU()
+        self.conv2 = CausalConv1d(channels, channels, kernel_size)
+        self.relu2 = nn.ReLU()
+        self.ln = nn.LayerNorm(channels)
+
+    def forward(self, x):
+        # x shape: [B, C, T]
+        residual = x
+        out = self.conv1(x)
+        out = self.relu1(out)
+        out = self.conv2(out)
+        # Residual connection
+        out = out + residual
+        out = self.relu2(out)
+        
+        # LayerNorm expects [B, T, C]
+        out = out.transpose(1, 2)
+        out = self.ln(out)
+        out = out.transpose(1, 2)
+        return out
+
+
 class ConvByteCompressor(nn.Module):
-    def __init__(self, d_model=512, ic=64, oc=128, compression_rate=4):
+    def __init__(self, d_model=512, ic=64, oc=128, compression_rate=4, n_layers=2):
         super().__init__()
         self.ic = ic
         self.oc = oc
-        # 1. Raw Byte Embedding: 256 possible byte values + 1 for padding
+        # 1. Raw Byte Embedding
         self.byte_embedding = nn.Embedding(256, ic)
         
-        # 2. Convolutional Stem: This replaces the tokenizer's compression
-        # We use a stride equal to the compression rate to shorten the sequence
-        self.conv1 = CausalConv1d(in_channels=ic, out_channels=oc, kernel_size=3)
-        self.relu1 = nn.ReLU()
-        self.conv2 = CausalConv1d(in_channels=oc, out_channels=d_model, 
-                                 kernel_size=compression_rate, 
-                                 stride=compression_rate) # Key 'compression' step
-        self.relu2 = nn.ReLU()
+        # 2. Residual Pre-processing
+        self.residual_blocks = nn.ModuleList([
+            ResidualCausalConvBlock(ic) for _ in range(n_layers)
+        ])
+        
+        # 3. Convolutional Stem: This replaces the tokenizer's compression
+        self.conv_stem = nn.Sequential(
+            CausalConv1d(in_channels=ic, out_channels=oc, kernel_size=3),
+            nn.ReLU(),
+            CausalConv1d(in_channels=oc, out_channels=d_model, 
+                         kernel_size=compression_rate, 
+                         stride=compression_rate), # Key 'compression' step
+            nn.ReLU(),
+        )
         self.ln = nn.LayerNorm(d_model)
 
     def forward(self, byte_ids):
@@ -45,31 +77,36 @@ class ConvByteCompressor(nn.Module):
         # Conv1d expects [batch, channels, length]
         x = x.transpose(1, 2) 
         
+        # Apply residual pre-processing
+        for block in self.residual_blocks:
+            x = block(x)
+            
         # Compress the sequence length by 'compression_rate'
-        x = self.conv1(x)
-        x = self.relu1(x)
-        x = self.conv2(x)
-        x = self.relu2(x)
-        x = self.ln(x.transpose(1, 2))
+        x = self.conv_stem(x)
         
         # Return to Transformer-ready shape: [batch, compressed_len, d_model]
+        x = self.ln(x.transpose(1, 2))
         return x
 
 
 class ConvByteDecompressor(nn.Module):
-    def __init__(self, d_model=512, ic=64, oc=128, vocab_size=256, compression_rate=4):
+    def __init__(self, d_model=512, ic=64, oc=128, vocab_size=256, compression_rate=4, n_layers=2):
         super().__init__()
         # 1. Upsample the sequence length back to original
-        # If input is [B, T/4, d_model], we want [B, T, 128]
         self.deconv1 = nn.ConvTranspose1d(in_channels=d_model, out_channels=oc, 
                                         kernel_size=compression_rate, 
                                         stride=compression_rate)
         self.relu1 = nn.ReLU()
-        # 2. Refine the sequence
-        # Refinement MUST also be causal
+        
+        # 2. Residual Post-processing
+        self.residual_blocks = nn.ModuleList([
+            ResidualCausalConvBlock(oc) for _ in range(n_layers)
+        ])
+        
+        # 3. Refine the sequence
         self.conv_refine = CausalConv1d(in_channels=oc, out_channels=ic, kernel_size=3)
         self.relu2 = nn.ReLU()
-        # 3. Project to byte vocabulary
+        # 4. Project to byte vocabulary
         self.lm_head = nn.Linear(ic, vocab_size)
 
     def forward(self, x):
@@ -80,6 +117,10 @@ class ConvByteDecompressor(nn.Module):
         x = self.deconv1(x) # [batch, oc, original_len]
         x = self.relu1(x)
         
+        # Apply residential post-processing
+        for block in self.residual_blocks:
+            x = block(x)
+            
         # Refine channels
         x = self.conv_refine(x) # [batch, ic, original_len]
         x = self.relu2(x)
@@ -196,7 +237,7 @@ class Block(nn.Module):
 
 class GPT(nn.Module):
 
-    def __init__(self, vocab_size, n_embd, block_size, n_head, n_layer, dropout, device, use_conv_compressor=False, compression_rate=4):
+    def __init__(self, vocab_size, n_embd, block_size, n_head, n_layer, dropout, device, use_conv_compressor=False, compression_rate=4, n_conv_layers=2):
         super().__init__()
         self.device = device
         self.block_size = block_size
@@ -206,8 +247,8 @@ class GPT(nn.Module):
         if use_conv_compressor:
             self.ic = 256 # 64
             self.oc = 512 # 128
-            self.compressor = ConvByteCompressor(d_model=n_embd, ic=self.ic, oc=self.oc, compression_rate=compression_rate)
-            self.decompressor = ConvByteDecompressor(d_model=n_embd, vocab_size=vocab_size, ic=self.ic, oc=self.oc, compression_rate=compression_rate)
+            self.compressor = ConvByteCompressor(d_model=n_embd, ic=self.ic, oc=self.oc, compression_rate=compression_rate, n_layers=n_conv_layers)
+            self.decompressor = ConvByteDecompressor(d_model=n_embd, vocab_size=vocab_size, ic=self.ic, oc=self.oc, compression_rate=compression_rate, n_layers=n_conv_layers)
         else:
             self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
             self.lm_head = nn.Linear(n_embd, vocab_size)

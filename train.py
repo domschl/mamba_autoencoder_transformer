@@ -16,12 +16,13 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 if torch.backends.mps.is_available():
     device = 'mps'
 eval_iters = 50
-n_embd = 256
+n_embd = 512
 n_head = 16
-n_layer = 4
+n_layer = 8
 dropout = 0.1
 use_conv_compressor = True
-compression_rate = 2
+compression_rate = 4
+n_conv_layers = 3 # number of residual causal conv blocks
 
 torch.manual_seed(1337)
 random.seed(1337)
@@ -44,10 +45,10 @@ else:
 train_loader = DataLoader(text, tokenizer, block_size, batch_size, device, cache_dir=dataset_dir, train_split=0.9)
 
 # Model
-model = GPT(vocab_size, n_embd, block_size, n_head, n_layer, dropout, device, use_conv_compressor, compression_rate)
+model = GPT(vocab_size, n_embd, block_size, n_head, n_layer, dropout, device, use_conv_compressor, compression_rate, n_conv_layers)
 m = model.to(device)
 
-# print_model_summary(m)
+print_model_summary(m)
 
 # Optimizer
 optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate) # , weight_decay=1e-2)
