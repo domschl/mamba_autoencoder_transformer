@@ -6,6 +6,20 @@ import math
 import random
 
 
+class CausalConv1d(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, dilation=1, **kwargs):
+        super().__init__()
+        self.padding = (kernel_size - 1) * dilation
+        self.conv = nn.Conv1d(in_channels, out_channels, kernel_size, 
+                              stride=stride, padding=0, dilation=dilation, **kwargs)
+
+    def forward(self, x):
+        # x: [B, C, T]
+        # Pad on the left
+        x = F.pad(x, (self.padding, 0))
+        return self.conv(x)
+
+
 class ConvByteCompressor(nn.Module):
     def __init__(self, d_model=512, ic=64, oc=128, compression_rate=4):
         super().__init__()
@@ -16,11 +30,11 @@ class ConvByteCompressor(nn.Module):
         
         # 2. Convolutional Stem: This replaces the tokenizer's compression
         # We use a stride equal to the compression rate to shorten the sequence
-        self.conv1 = nn.Conv1d(in_channels=ic, out_channels=oc, kernel_size=3, padding=1)
+        self.conv1 = CausalConv1d(in_channels=ic, out_channels=oc, kernel_size=3)
         self.relu1 = nn.ReLU()
-        self.conv2 = nn.Conv1d(in_channels=oc, out_channels=d_model, 
-                      kernel_size=compression_rate, 
-                      stride=compression_rate) # Key 'compression' step
+        self.conv2 = CausalConv1d(in_channels=oc, out_channels=d_model, 
+                                 kernel_size=compression_rate, 
+                                 stride=compression_rate) # Key 'compression' step
         self.relu2 = nn.ReLU()
         self.ln = nn.LayerNorm(d_model)
 
@@ -52,7 +66,8 @@ class ConvByteDecompressor(nn.Module):
                                         stride=compression_rate)
         self.relu1 = nn.ReLU()
         # 2. Refine the sequence
-        self.conv_refine = nn.Conv1d(in_channels=oc, out_channels=ic, kernel_size=3, padding=1)
+        # Refinement MUST also be causal
+        self.conv_refine = CausalConv1d(in_channels=oc, out_channels=ic, kernel_size=3)
         self.relu2 = nn.ReLU()
         # 3. Project to byte vocabulary
         self.lm_head = nn.Linear(ic, vocab_size)
@@ -199,26 +214,38 @@ class GPT(nn.Module):
         self.positional_encoding_table = nn.Embedding(block_size, n_embd)
         self.blocks = nn.ModuleList([Block(n_embd, n_head, block_size, dropout) for i in range(n_layer)])
         self.ln_f = nn.LayerNorm(n_embd) # final layer norm
+        
+        if use_conv_compressor:
+            # We need an SOS token to represent the context BEFORE the first block
+            self.sos_token = nn.Parameter(torch.randn(1, 1, n_embd))
 
     def forward(self, idx, targets=None):
         B, T = idx.shape
 
         # idx and targets are both (B,T) tensor of integers
         if self.use_conv_compressor:
-            x = self.compressor(idx)
-            B, T_compressed, C = x.shape
-            pos_emb = self.positional_encoding_table(torch.arange(T_compressed, device=self.device)) # (T,C)
-            x = x + pos_emb # (B, compressed_T, n_embd)
+            x = self.compressor(idx) # x is (B, T_compressed, C)
         else:
-            pos_emb = self.positional_encoding_table(torch.arange(T, device=self.device)) # (T,C)
             tok_emb = self.token_embedding_table(idx) # (B,T,C)
+            pos_emb = self.positional_encoding_table(torch.arange(T, device=self.device)) # (T,C)
             x = tok_emb + pos_emb # (B,T,C)
+            
         for block in self.blocks:
             x = block(x)
         x = self.ln_f(x) # (B, T_compressed or T, C)
 
         if self.use_conv_compressor:
-            logits = self.decompressor(x) # (B, T, vocab_size)
+            # HIERARCHICAL CAUSAL ALIGNMENT:
+            # We must shift the compressed hidden states so that H[i] predicts block i+1.
+            # Block 0 is predicted by the learned SOS token.
+            sos = self.sos_token.expand(B, 1, -1)
+            # Prepend SOS and drop the last hidden state to maintain sequence length (compressed)
+            x_shifted = torch.cat((sos, x), dim=1)[:, :-1, :]
+            
+            # Decompress back to byte-level sequence
+            logits = self.decompressor(x_shifted) # (B, T_expanded, vocab_size)
+            # Crop to original sequence length T
+            logits = logits[:, :T, :]
         else:
             logits = self.lm_head(x) # (B, T, vocab_size)
 
@@ -241,8 +268,9 @@ class GPT(nn.Module):
             idx_cond = idx[:, -self.block_size:]
             # get the predictions
             logits, loss = self(idx_cond)
-            # focus only on the last time step
+            # Correct prediction for the next token is at the last time step
             logits = logits[:, -1, :] # becomes (B, C)
+            
             # scale by temperature
             logits = logits / temperature
             # apply softmax to get probabilities

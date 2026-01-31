@@ -7,7 +7,7 @@ from data_loader import load_text_data, Tokenizer, DataLoader
 from model import GPT, print_model_summary
 
 # Hyperparameters
-batch_size = 256 # how many independent sequences will we process in parallel?
+batch_size = 32 # how many independent sequences will we process in parallel?
 block_size = 256 # what is the maximum context length for predictions?
 max_iters = 100000
 eval_interval = 512
@@ -95,6 +95,11 @@ for iter in range(max_iters):
                 bytes_list = m.generate(context, max_new_tokens=128, temperature=temperature)[0].tolist()
                 # Convert bytes to string
                 text = bytes(bytes_list).decode('utf-8', errors='ignore')
+                text = text.replace('\n', ' ')
+                old_text = ""
+                while old_text != text:
+                    old_text = text
+                    text = text.replace('  ', ' ')
                 print(text)
             else:
                 print(tokenizer.decode(m.generate(context, max_new_tokens=128, temperature=temperature)[0].tolist()))
