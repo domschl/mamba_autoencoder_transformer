@@ -9,7 +9,7 @@ from model import GPT, print_model_summary
 
 # Hyperparameters
 batch_size = 64 # how many independent sequences will we process in parallel?
-block_size = 64 # what is the maximum context length for predictions?
+block_size = 256 # what is the maximum context length for predictions?
 max_iters = 100000
 eval_interval = 512
 learning_rate = 1e-4
@@ -76,6 +76,8 @@ def estimate_loss():
         ae_losses = torch.zeros(eval_iters)
         for k in range(eval_iters):
             X, Y = train_loader.get_batch(split)
+            if use_conv_compressor:
+                Y = X
             logits, loss, ae_loss = model(X, Y, return_ae_loss=True)
             losses[k] = loss.item()
             if ae_loss is not None:
@@ -132,6 +134,8 @@ for iter in range(max_iters):
 
     # sample a batch of data
     xb, yb = train_loader.get_batch('train')
+    if use_conv_compressor:
+        yb = xb
 
     # evaluate the loss
     # Use compound loss: return_ae_loss=True
