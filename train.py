@@ -36,7 +36,7 @@ torch.manual_seed(1337)
 random.seed(1337)
 
 # Load data
-dataset_dir = os.path.join(os.path.dirname(__file__), 'dataset')``
+dataset_dir = os.path.join(os.path.dirname(__file__), 'dataset')
 text = load_text_data(dataset_dir)
 if not text:
     print("Error: No text found in dataset directory!")
