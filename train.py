@@ -29,7 +29,7 @@ compression_rate = 4
 n_compress_layers = 2 # number of residual causal conv blocks
 n_decompress_layers = 0 # number of residual causal conv blocks
 compress_causal = True
-decompress_causal = False
+decompress_causal = True
 use_sos = True
 ae_loss_weight = 0.5 # Compound Loss Weight
 
