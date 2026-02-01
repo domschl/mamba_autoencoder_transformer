@@ -32,7 +32,7 @@ n_decompress_layers = 0 # number of residual causal conv blocks
 compress_causal = True
 decompress_causal = True
 use_sos = True
-ae_loss_weight = 0.0 # Compound Loss Weight
+ae_loss_weight = 0.5 # Compound Loss Weight
 
 
 torch.manual_seed(1337)
