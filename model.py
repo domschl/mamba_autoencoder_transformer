@@ -262,26 +262,24 @@ class GPT(nn.Module):
                 # We need an SOS token to represent the context BEFORE the first block
                 self.sos_token = nn.Parameter(torch.randn(1, 1, n_embd))
 
-    def forward(self, idx, targets=None, pretrain_mode=False):
+    def forward(self, idx, targets=None, return_ae_loss=False):
         B, T = idx.shape
 
-        if pretrain_mode:
-            # Phase 1: Direct Autoencoder Reconstruction
-            # Bypass Transformer blocks to train compressor/decompressor only
-            x = self.compressor(idx)
-            logits = self.decompressor(x)
-            logits = logits[:, :T, :]
-            
-            if targets is None:
-                targets = idx # Autoencoder task
-            
-            BT, C = B*T, logits.shape[-1]
-            loss = F.cross_entropy(logits.view(BT, C), targets.view(BT))
-            return logits, loss
-
+        ae_loss = None
         # idx and targets are both (B,T) tensor of integers
         if self.use_conv_compressor:
-            x = self.compressor(idx) # x is (B, T_compressed, C)
+            x_compressed = self.compressor(idx) # x is (B, T_compressed, C)
+            x = x_compressed
+            
+            if return_ae_loss:
+                # Calculate Autoencoder Loss (Reconstruction)
+                logits_ae = self.decompressor(x_compressed)
+                logits_ae = logits_ae[:, :T, :]
+                BT_ae, C_ae = B*T, logits_ae.shape[-1]
+                # If targets is None, we reconstruct idx itself.
+                target_ae = targets if targets is not None else idx
+                ae_loss = F.cross_entropy(logits_ae.view(BT_ae, C_ae), target_ae.view(BT_ae))
+
         else:
             tok_emb = self.token_embedding_table(idx) # (B,T,C)
             pos_emb = self.positional_encoding_table(torch.arange(T, device=self.device)) # (T,C)
@@ -292,11 +290,6 @@ class GPT(nn.Module):
         x = self.ln_f(x) # (B, T_compressed or T, C)
 
         if self.use_conv_compressor:
-            if self.use_sos is True:
-                # HIERARCHICAL CAUSAL ALIGNMENT:
-                # We must shift the compressed hidden states so that H[i] predicts block i+1.
-                # Block 0 is predicted by the learned SOS token.
-                sos = self.sos_token.expand(B, 1, -1)
             if self.use_sos is True:
                 # HIERARCHICAL CAUSAL ALIGNMENT:
                 # We must shift the compressed hidden states so that H[i] predicts block i+1.
@@ -331,6 +324,9 @@ class GPT(nn.Module):
             BT, C = B*T, logits.shape[-1]
             loss = F.cross_entropy(logits.view(BT, C), targets.view(BT))
 
+        if return_ae_loss:
+            return logits, loss, ae_loss
+            
         return logits, loss
 
     def generate(self, idx, max_new_tokens, temperature=1.0):

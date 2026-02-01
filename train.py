@@ -12,8 +12,8 @@ batch_size = 64 # how many independent sequences will we process in parallel?
 block_size = 64 # what is the maximum context length for predictions?
 max_iters = 100000
 eval_interval = 512
-pretrain_lr = 3e-4
-main_lr = 1e-4
+learning_rate = 1e-4
+# pretrain_lr = 3e-4 # Removed for compound loss
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 if torch.backends.mps.is_available():
     device = 'mps'
@@ -31,9 +31,7 @@ n_decompress_layers = 0 # number of residual causal conv blocks
 compress_causal = True
 decompress_causal = False
 use_sos = True
-# Phase 1: Pre-train, Phase 2: GPT, Phase 3: Repair, etc.
-# [Pre1, GPT1, Repair1, GPT2, Repair2, ...]
-phase_schedule = [2000, 500, 500, 2000, 500, 2000, 500] 
+ae_loss_weight = 0.5 # Compound Loss Weight
 
 
 torch.manual_seed(1337)
@@ -66,20 +64,24 @@ m = model.to(device)
 print_model_summary(m)
 
 # Optimizer
-optimizer = torch.optim.AdamW(model.parameters(), lr=pretrain_lr) # Start with pretrain LR
+# Optimizer
+optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate) # , weight_decay=1e-2)
 
 @torch.no_grad()
-def estimate_loss(pretrain_mode=False):
+def estimate_loss():
     out = {}
     model.eval()
     for split in ['train', 'val']:
         losses = torch.zeros(eval_iters)
+        ae_losses = torch.zeros(eval_iters)
         for k in range(eval_iters):
             X, Y = train_loader.get_batch(split)
-            # In pretrain_mode, we compare against X (input reconstruction)
-            logits, loss = model(X, X if pretrain_mode else Y, pretrain_mode=pretrain_mode)
+            logits, loss, ae_loss = model(X, Y, return_ae_loss=True)
             losses[k] = loss.item()
+            if ae_loss is not None:
+                ae_losses[k] = ae_loss.item()
         out[split] = losses.mean()
+        out[f'{split}_ae'] = ae_losses.mean()
     model.train()
     return out
 
@@ -88,113 +90,71 @@ print("Starting training...")
 start_time = time.time()
 last_output = None
 mean_loss:None|float = None
+mean_ae_loss:None|float = None
 
-# Phase Management
-current_phase_idx = 0
-phase_start_step = 0
-current_phase_duration = phase_schedule[0]
-pretrain_mode = True # Start in Pretrain
-total_training_steps = max_iters + sum(phase_schedule)
+for iter in range(max_iters):
 
-for multi_iter in range(total_training_steps):
-    
-    # Check for phase switch
-    if current_phase_idx < len(phase_schedule) and (multi_iter - phase_start_step) >= current_phase_duration:
-        phase_start_step = multi_iter
-        current_phase_idx += 1
-        
-        # Determine new phase properties
-        if current_phase_idx < len(phase_schedule):
-            current_phase_duration = phase_schedule[current_phase_idx]
-            # Even indices (0, 2, 4...) are PRETRAIN/REPAIR, Odd are GPT
-            new_pretrain_mode = (current_phase_idx % 2 == 0)
-        else:
-            # Schedule exhausted: GPT forever
-            new_pretrain_mode = False
-            
-        # Update model mode and optimizer
-        if pretrain_mode != new_pretrain_mode:
-            pretrain_mode = new_pretrain_mode
-            phase_type = "REPAIR" if (current_phase_idx % 2 == 0 and current_phase_idx > 0) else ("PRETRAIN" if current_phase_idx == 0 else "GPT")
-            if current_phase_idx >= len(phase_schedule): phase_type = "FINAL-GPT"
-            
-            # LR Rule: Only index 0 gets pretrain_lr
-            current_lr = pretrain_lr if current_phase_idx == 0 else main_lr
-            
-            print(f"\n" + "="*50)
-            print(f"SWITCHING TO PHASE {current_phase_idx}: {phase_type} (Duration: {current_phase_duration if current_phase_idx < len(phase_schedule) else 'INF'}, LR: {current_lr})")
-            print("="*50)
-            
-            mean_loss = None # Reset loss smoothing
-            for param_group in optimizer.param_groups:
-                param_group['lr'] = current_lr
-
-    iter = multi_iter - phase_start_step
 
     # every once in a while evaluate the loss on train and val sets
-    if multi_iter % eval_interval == 0 or multi_iter == total_training_steps - 1:
-        losses = estimate_loss(pretrain_mode=pretrain_mode)
+    if iter % eval_interval == 0 or iter == max_iters - 1:
+        losses = estimate_loss()
         mean_loss = losses['train']
+        mean_ae_loss = losses['train_ae']
         print()
         print("=" * 50)
-        phase_name = "PRETRAIN" if pretrain_mode else "GPT"
-        print(f"step {iter} ({phase_name}): train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+        print(f"step {iter}: train loss {losses['train']:.4f} (ae: {losses['train_ae']:.4f}), val loss {losses['val']:.4f} (ae: {losses['val_ae']:.4f})")
         
         # Save checkpoint
-        checkpoint_path = f"checkpoint_{phase_name.lower()}_step_{iter}.pt"
+        checkpoint_path = f"checkpoint_step_{iter}.pt"
         torch.save(model.state_dict(), checkpoint_path)
 
         # Generate sample (only relevant in Phase 2 or for checking reconstruction)
         if use_conv_compressor:
-            context = torch.tensor([[32,32,32,32]], dtype=torch.long, device=device)
+             context = torch.tensor([[32,32,32,32]], dtype=torch.long, device=device)
         else:
             context = torch.zeros((1, 1), dtype=torch.long, device=device)
         
-        sample_iters = [0.8, 1.0] if not pretrain_mode else [1.0]
-        for temperature in sample_iters:
-            if pretrain_mode:
-                # In pretraining, just show reconstruction of a real batch
-                with torch.no_grad():
-                    xb_sample, _ = train_loader.get_batch('val')
-                    logits_sample, _ = model(xb_sample[:1], pretrain_mode=True)
-                    preds_sample = torch.argmax(logits_sample, dim=-1)
-                    orig_bytes = xb_sample[0][:64].tolist()
-                    recon_bytes = preds_sample[0][:64].tolist()
-                    print(f"Original:      {bytes(orig_bytes).decode('utf-8', errors='ignore')}")
-                    print(f"Reconstructed: {bytes(recon_bytes).decode('utf-8', errors='ignore')}")
+        for temperature in [0.8, 1.0]:
+            print(f"Generating sample at step {iter}, temperature={temperature}...")
+            if use_conv_compressor:
+                bytes_list = m.generate(context, max_new_tokens=128, temperature=temperature)[0].tolist()
+                # Convert bytes to string
+                text = bytes(bytes_list).decode('utf-8', errors='ignore')
+                text = text.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
+                old_text = ""
+                while old_text != text:
+                    old_text = text
+                    text = text.replace('  ', ' ')
+                print(text)
             else:
-                print(f"Generating sample at step {iter}, temperature={temperature}...")
-                if use_conv_compressor:
-                    bytes_list = m.generate(context, max_new_tokens=128, temperature=temperature)[0].tolist()
-                    # Convert bytes to string
-                    text = bytes(bytes_list).decode('utf-8', errors='ignore')
-                    text = text.replace('\n', ' ').replace('\r', ' ').replace('\t', ' ')
-                    old_text = ""
-                    while old_text != text:
-                        old_text = text
-                        text = text.replace('  ', ' ')
-                    print(text)
-                else:
-                    print(tokenizer.decode(m.generate(context, max_new_tokens=128, temperature=temperature)[0].tolist()))
+                print(tokenizer.decode(m.generate(context, max_new_tokens=128, temperature=temperature)[0].tolist()))
             print("-" * 50)
 
     # sample a batch of data
     xb, yb = train_loader.get_batch('train')
 
     # evaluate the loss
-    logits, loss = model(xb, xb if pretrain_mode else yb, pretrain_mode=pretrain_mode)
+    # Use compound loss: return_ae_loss=True
+    logits, loss_gpt, loss_ae = model(xb, yb, return_ae_loss=True)
+    
+    total_loss = loss_gpt
+    if loss_ae is not None:
+        total_loss = total_loss + ae_loss_weight * loss_ae
+        
     optimizer.zero_grad(set_to_none=True)
-    loss.backward()
+    total_loss.backward()
     optimizer.step()
     
     if mean_loss is None:
-        mean_loss = loss.item()
+        mean_loss = loss_gpt.item()
+        mean_ae_loss = loss_ae.item() if loss_ae is not None else 0.0
     else:
-        mean_loss = (mean_loss * 99 + loss.item()) / 100.0
+        mean_loss = (mean_loss * 99 + loss_gpt.item()) / 100.0
+        if loss_ae is not None:
+             mean_ae_loss = (mean_ae_loss * 99 + loss_ae.item()) / 100.0
         
     if last_output is None or time.time() - last_output > 1:
-        phase_label = "pre" if pretrain_mode else "gpt"
-        print(f"\rstep {iter} ({phase_label}): train loss {mean_loss:.4f}", end="")
+        print(f"\rstep {iter}: train loss {mean_loss:.4f} (ae: {mean_ae_loss:.4f})", end="")
         sys.stdout.flush()
         last_output = time.time()
 
