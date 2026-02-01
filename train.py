@@ -31,8 +31,9 @@ n_decompress_layers = 0 # number of residual causal conv blocks
 compress_causal = True
 decompress_causal = False
 use_sos = True
-pretrain_iters = 2000 # Phase 1: Initial Autoencoder pre-training
-repair_interval = 500 # Phase 2+: Alternating between GPT and Repair
+# Phase 1: Pre-train, Phase 2: GPT, Phase 3: Repair, etc.
+# [Pre1, GPT1, Repair1, GPT2, Repair2, ...]
+phase_schedule = [2000, 500, 500, 2000, 500, 2000, 500] 
 
 
 torch.manual_seed(1337)
@@ -89,44 +90,49 @@ last_output = None
 mean_loss:None|float = None
 
 # Phase Management
-pretrain_mode = pretrain_iters > 0
-total_iters = max_iters + pretrain_iters
+current_phase_idx = 0
+phase_start_step = 0
+current_phase_duration = phase_schedule[0]
+pretrain_mode = True # Start in Pretrain
+total_training_steps = max_iters + sum(phase_schedule)
 
-for multi_iter in range(total_iters):
+for multi_iter in range(total_training_steps):
     
-    # Check for phase switch / Alternation
-    if multi_iter < pretrain_iters:
-        current_pretrain_mode = True
-        current_lr = pretrain_lr
-        phase_name = "PRETRAIN"
-    else:
-        # Alternating cycle
-        cycle_idx = (multi_iter - pretrain_iters) // repair_interval
-        if cycle_idx % 2 == 0:
-            current_pretrain_mode = False
-            current_lr = main_lr
-            phase_name = "GPT"
+    # Check for phase switch
+    if current_phase_idx < len(phase_schedule) and (multi_iter - phase_start_step) >= current_phase_duration:
+        phase_start_step = multi_iter
+        current_phase_idx += 1
+        
+        # Determine new phase properties
+        if current_phase_idx < len(phase_schedule):
+            current_phase_duration = phase_schedule[current_phase_idx]
+            # Even indices (0, 2, 4...) are PRETRAIN/REPAIR, Odd are GPT
+            new_pretrain_mode = (current_phase_idx % 2 == 0)
         else:
-            current_pretrain_mode = True
-            current_lr = pretrain_lr
-            phase_name = "REPAIR"
+            # Schedule exhausted: GPT forever
+            new_pretrain_mode = False
+            
+        # Update model mode and optimizer
+        if pretrain_mode != new_pretrain_mode:
+            pretrain_mode = new_pretrain_mode
+            phase_type = "REPAIR" if (current_phase_idx % 2 == 0 and current_phase_idx > 0) else ("PRETRAIN" if current_phase_idx == 0 else "GPT")
+            if current_phase_idx >= len(phase_schedule): phase_type = "FINAL-GPT"
+            
+            # LR Rule: Only index 0 gets pretrain_lr
+            current_lr = pretrain_lr if current_phase_idx == 0 else main_lr
+            
+            print(f"\n" + "="*50)
+            print(f"SWITCHING TO PHASE {current_phase_idx}: {phase_type} (Duration: {current_phase_duration if current_phase_idx < len(phase_schedule) else 'INF'}, LR: {current_lr})")
+            print("="*50)
+            
+            mean_loss = None # Reset loss smoothing
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = current_lr
 
-    # Apply Phase / LR changes
-    if pretrain_mode != current_pretrain_mode:
-        print(f"\n" + "="*50)
-        print(f"SWITCHING TO {phase_name} PHASE (LR: {current_lr})")
-        print("="*50)
-        pretrain_mode = current_pretrain_mode
-        mean_loss = None # Reset loss smoothing on phase change
-        
-    for param_group in optimizer.param_groups:
-        if param_group['lr'] != current_lr:
-            param_group['lr'] = current_lr
-        
-    iter = multi_iter if multi_iter < pretrain_iters else multi_iter - pretrain_iters
+    iter = multi_iter - phase_start_step
 
     # every once in a while evaluate the loss on train and val sets
-    if multi_iter % eval_interval == 0 or multi_iter == total_iters - 1:
+    if multi_iter % eval_interval == 0 or multi_iter == total_training_steps - 1:
         losses = estimate_loss(pretrain_mode=pretrain_mode)
         mean_loss = losses['train']
         print()
