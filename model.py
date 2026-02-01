@@ -242,6 +242,7 @@ class GPT(nn.Module):
             
         # each token directly reads off the logits for the next token from a lookup table
         self.use_conv_compressor = use_conv_compressor
+        self.compression_rate = compression_rate
         if use_conv_compressor:
             self.ic = base_c * compression_rate
             self.oc = base_c * compression_rate
@@ -333,35 +334,56 @@ class GPT(nn.Module):
         # Temp > 1.0 = more random
         # Temp < 1.0 = more deterministic
         # idx is (B, T) array of indices in the current context
-        for _ in range(max_new_tokens):
-            # crop idx to the last block_size tokens, but ensure we keep a multiple of compression_rate if needed
-            # For now, just keep it simple.
-            idx_cond = idx[:, -self.block_size:]
+        
+        # Adjust max_new_tokens to be a multiple of compression_rate if using compressor
+        step_size = 1
+        if self.use_conv_compressor:
+            step_size = self.compression_rate
+            
+        params = max_new_tokens
+        steps = params // step_size
+        
+        for _ in range(steps):
+            # crop idx to the last block_size tokens... approximate
+            idx_cond = idx[:, -self.block_size:] 
             
             # get the predictions
             logits, loss = self(idx_cond)
             
-            # The model outputs predictions for 0..N.
-            # output[t] is the prediction for idx[t].
-            # We want the prediction for idx[T] (the next token).
-            # This is located at index T in the logits.
-            # Note: idx_cond has length T_cond. We want logits[:, T_cond, :].
-            
-            next_token_idx = idx_cond.shape[1]
-            if next_token_idx < logits.shape[1]:
-                 logits = logits[:, next_token_idx, :] # (B, C)
+            if self.use_conv_compressor:
+                # BLOCK GENERATION:
+                # The Transformer predicts the next latent.
+                # The Decompressor expands it to 'step_size' tokens.
+                # All 'step_size' tokens in the last block of the output are valid predictions
+                # for the next block of input.
+                
+                # Take the last 'step_size' logits (corresponding to the newly predicted block)
+                block_logits = logits[:, -step_size:, :] # (B, 4, V)
+                
+                # Sample all tokens in the block
+                B_sz, T_block, V_sz = block_logits.shape
+                block_logits = block_logits / temperature
+                probs = F.softmax(block_logits, dim=-1) # (B, 4, V)
+                
+                # Sample 1 token per position in the block independently
+                # (We assume the joint dependency is handled by the deterministic decompressor structure)
+                idx_next_list = []
+                for t in range(T_block):
+                    idx_next_t = torch.multinomial(probs[:, t, :], num_samples=1) # (B, 1)
+                    idx_next_list.append(idx_next_t)
+                
+                idx_next = torch.cat(idx_next_list, dim=1) # (B, 4)
+                
             else:
-                 # If logits are not long enough (should not happen with the fix above), take the last
-                 logits = logits[:, -1, :]
+                # Standard autoregressive generation
+                logits = logits[:, -1, :] # becomes (B, C)
+                logits = logits / temperature
+                probs = F.softmax(logits, dim=-1) # (B, C)
+                idx_next = torch.multinomial(probs, num_samples=1) # (B, 1)
 
-            # scale by temperature
-            logits = logits / temperature
-            # apply softmax to get probabilities
-            probs = F.softmax(logits, dim=-1) # (B, C)
-            # sample from the distribution
-            idx_next = torch.multinomial(probs, num_samples=1) # (B, 1)
             # append sampled index to the running sequence
-            idx = torch.cat((idx, idx_next), dim=1) # (B, T+1)
+            idx = torch.cat((idx, idx_next), dim=1) 
+            
         return idx
 
 
