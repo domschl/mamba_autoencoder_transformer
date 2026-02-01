@@ -262,8 +262,22 @@ class GPT(nn.Module):
                 # We need an SOS token to represent the context BEFORE the first block
                 self.sos_token = nn.Parameter(torch.randn(1, 1, n_embd))
 
-    def forward(self, idx, targets=None):
+    def forward(self, idx, targets=None, pretrain_mode=False):
         B, T = idx.shape
+
+        if pretrain_mode:
+            # Phase 1: Direct Autoencoder Reconstruction
+            # Bypass Transformer blocks to train compressor/decompressor only
+            x = self.compressor(idx)
+            logits = self.decompressor(x)
+            logits = logits[:, :T, :]
+            
+            if targets is None:
+                targets = idx # Autoencoder task
+            
+            BT, C = B*T, logits.shape[-1]
+            loss = F.cross_entropy(logits.view(BT, C), targets.view(BT))
+            return logits, loss
 
         # idx and targets are both (B,T) tensor of integers
         if self.use_conv_compressor:
@@ -297,10 +311,8 @@ class GPT(nn.Module):
         if targets is None:
             loss = None
         else:
-            B, T, C = logits.shape
-            logits = logits.view(B*T, C)
-            targets = targets.view(B*T)
-            loss = F.cross_entropy(logits, targets)
+            BT, C = B*T, logits.shape[-1]
+            loss = F.cross_entropy(logits.view(BT, C), targets.view(BT))
 
         return logits, loss
 
