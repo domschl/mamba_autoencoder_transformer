@@ -6,26 +6,35 @@ import math
 import random
 
 
-class CausalConv1d(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size, stride=1, dilation=1, **kwargs):
+class FlexibleConv1d(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, dilation=1, causal=True, **kwargs):
         super().__init__()
-        self.padding = (kernel_size - 1) * dilation
-        self.conv = nn.Conv1d(in_channels, out_channels, kernel_size, 
-                              stride=stride, padding=0, dilation=dilation, **kwargs)
+        self.causal = causal
+        if causal:
+            self.padding = (kernel_size - 1) * dilation
+            self.conv = nn.Conv1d(in_channels, out_channels, kernel_size, 
+                                  stride=stride, padding=0, dilation=dilation, **kwargs)
+        else:
+            # Symmetric padding for non-causal
+            self.padding = (kernel_size - 1) * dilation // 2
+            self.conv = nn.Conv1d(in_channels, out_channels, kernel_size, 
+                                  stride=stride, padding=self.padding, dilation=dilation, **kwargs)
 
     def forward(self, x):
-        # x: [B, C, T]
-        # Pad on the left
-        x = F.pad(x, (self.padding, 0))
-        return self.conv(x)
+        if self.causal:
+            # Pad on the left
+            x = F.pad(x, (self.padding, 0))
+            return self.conv(x)
+        else:
+            return self.conv(x)
 
 
-class ResidualCausalConvBlock(nn.Module):
-    def __init__(self, channels, kernel_size=3):
+class ResidualConvBlock(nn.Module):
+    def __init__(self, channels, kernel_size=3, causal=True):
         super().__init__()
-        self.conv1 = CausalConv1d(channels, channels, kernel_size)
+        self.conv1 = FlexibleConv1d(channels, channels, kernel_size, causal=causal)
         self.relu1 = nn.ReLU()
-        self.conv2 = CausalConv1d(channels, channels, kernel_size)
+        self.conv2 = FlexibleConv1d(channels, channels, kernel_size, causal=causal)
         self.relu2 = nn.ReLU()
         self.ln = nn.LayerNorm(channels)
 
@@ -47,7 +56,7 @@ class ResidualCausalConvBlock(nn.Module):
 
 
 class ConvByteCompressor(nn.Module):
-    def __init__(self, d_model=512, ic=64, oc=128, compression_rate=4, n_layers=2):
+    def __init__(self, d_model=512, ic=64, oc=128, kernel_size=3, compression_rate=4, n_layers=2, causal=True):
         super().__init__()
         self.ic = ic
         self.oc = oc
@@ -56,16 +65,16 @@ class ConvByteCompressor(nn.Module):
         
         # 2. Residual Pre-processing
         self.residual_blocks = nn.ModuleList([
-            ResidualCausalConvBlock(ic) for _ in range(n_layers)
+            ResidualConvBlock(ic, causal=causal) for _ in range(n_layers)
         ])
         
         # 3. Convolutional Stem: This replaces the tokenizer's compression
         self.conv_stem = nn.Sequential(
-            CausalConv1d(in_channels=ic, out_channels=oc, kernel_size=3),
+            FlexibleConv1d(in_channels=ic, out_channels=oc, kernel_size=kernel_size, causal=causal),
             nn.ReLU(),
-            CausalConv1d(in_channels=oc, out_channels=d_model, 
+            FlexibleConv1d(in_channels=oc, out_channels=d_model, 
                          kernel_size=compression_rate, 
-                         stride=compression_rate), # Key 'compression' step
+                         stride=compression_rate, causal=causal), # Key 'compression' step
             nn.ReLU(),
         )
         self.ln = nn.LayerNorm(d_model)
@@ -90,7 +99,7 @@ class ConvByteCompressor(nn.Module):
 
 
 class ConvByteDecompressor(nn.Module):
-    def __init__(self, d_model=512, ic=64, oc=128, vocab_size=256, compression_rate=4, n_layers=2):
+    def __init__(self, d_model=512, ic=64, oc=128, vocab_size=256, kernel_size=3, compression_rate=4, n_layers=2, causal=True):
         super().__init__()
         # 1. Upsample the sequence length back to original
         self.deconv1 = nn.ConvTranspose1d(in_channels=d_model, out_channels=oc, 
@@ -100,11 +109,11 @@ class ConvByteDecompressor(nn.Module):
         
         # 2. Residual Post-processing
         self.residual_blocks = nn.ModuleList([
-            ResidualCausalConvBlock(oc) for _ in range(n_layers)
+            ResidualConvBlock(oc, kernel_size=kernel_size, causal=causal) for _ in range(n_layers)
         ])
         
         # 3. Refine the sequence
-        self.conv_refine = CausalConv1d(in_channels=oc, out_channels=ic, kernel_size=3)
+        self.conv_refine = FlexibleConv1d(in_channels=oc, out_channels=ic, kernel_size=kernel_size, causal=causal)
         self.relu2 = nn.ReLU()
         # 4. Project to byte vocabulary
         self.lm_head = nn.Linear(ic, vocab_size)
@@ -205,50 +214,42 @@ class FeedForward(nn.Module):
 class Block(nn.Module):
     """ Transformer block: communication followed by computation """
 
-    def __init__(self, n_embd, n_head, block_size, dropout, activation_type='relu', 
-                 attention_type='standard', Omega=0.618033988749895, Omega_rnd_std=None, init_K=1.0, 
-                 residual_attention_mix=False, K_phase=False):
+    def __init__(self, n_embd, n_head, block_size, dropout):
         # n_embd: embedding dimension, n_head: the number of heads we'd like
         super().__init__()
         head_size = n_embd // n_head
-        if attention_type == 'arnold':
-            self.saa = ArnoldAttentionLayer(n_embd, n_head, Omega, Omega_rnd_std, init_K, K_phase)
-        if attention_type == 'standard' or residual_attention_mix is True:
-            self.sa = MultiHeadAttention(n_head, head_size, n_embd, block_size, dropout)
-        self.ffwd = FeedForward(n_embd, dropout, activation_type=activation_type)
+        self.sa = MultiHeadAttention(n_head, head_size, n_embd, block_size, dropout)
+        self.ffwd = FeedForward(n_embd, dropout)
         self.ln1 = nn.LayerNorm(n_embd)
         self.ln2 = nn.LayerNorm(n_embd)
-        self.attention_type = attention_type
-        self.residual_attention_mix = residual_attention_mix
-        self.K_phase = K_phase
 
     def forward(self, x):
-        if self.attention_type == 'arnold':
-            x = self.ln1(x)
-            if self.residual_attention_mix:
-                x = x + self.saa(x) + self.sa(x)
-            else:
-                x = x + self.saa(x)
-            x = x + self.ffwd(self.ln2(x))
-        else:
-            x = x + self.sa(self.ln1(x))
-            x = x + self.ffwd(self.ln2(x))
+        x = self.ln1(x)
+        x = x + self.sa(x)
+        x = x + self.ffwd(self.ln2(x))
         return x
 
 class GPT(nn.Module):
 
-    def __init__(self, vocab_size, n_embd, block_size, n_head, n_layer, dropout, device, use_conv_compressor=False, compression_rate=4, n_conv_layers=2):
+    def __init__(self, vocab_size, n_embd, block_size, n_head, n_layer, dropout, device, 
+                 use_conv_compressor=False, compression_rate=4, 
+                 n_compress_layers=2, n_decompress_layers=0, kernel_size=3, causal=True, decompress_causal=False,
+                 use_sos=True):
         super().__init__()
         self.device = device
         self.block_size = block_size
+        self.use_sos = use_sos
             
         # each token directly reads off the logits for the next token from a lookup table
         self.use_conv_compressor = use_conv_compressor
         if use_conv_compressor:
-            self.ic = 256 # 64
-            self.oc = 512 # 128
-            self.compressor = ConvByteCompressor(d_model=n_embd, ic=self.ic, oc=self.oc, compression_rate=compression_rate, n_layers=n_conv_layers)
-            self.decompressor = ConvByteDecompressor(d_model=n_embd, vocab_size=vocab_size, ic=self.ic, oc=self.oc, compression_rate=compression_rate, n_layers=n_conv_layers)
+            self.ic = 256 * compression_rate
+            self.oc = 256 * compression_rate
+            self.compressor = ConvByteCompressor(d_model=n_embd, ic=self.ic, oc=self.oc, kernel_size=kernel_size, 
+                                                 compression_rate=compression_rate, n_layers=n_compress_layers, causal=causal)
+            self.decompressor = ConvByteDecompressor(d_model=n_embd, vocab_size=vocab_size, ic=self.ic, oc=self.oc, 
+                                                     kernel_size=kernel_size, compression_rate=compression_rate, 
+                                                     n_layers=n_decompress_layers, causal=decompress_causal)
         else:
             self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
             self.lm_head = nn.Linear(n_embd, vocab_size)
@@ -257,8 +258,9 @@ class GPT(nn.Module):
         self.ln_f = nn.LayerNorm(n_embd) # final layer norm
         
         if use_conv_compressor:
-            # We need an SOS token to represent the context BEFORE the first block
-            self.sos_token = nn.Parameter(torch.randn(1, 1, n_embd))
+            if self.use_sos is True:
+                # We need an SOS token to represent the context BEFORE the first block
+                self.sos_token = nn.Parameter(torch.randn(1, 1, n_embd))
 
     def forward(self, idx, targets=None):
         B, T = idx.shape
@@ -276,13 +278,15 @@ class GPT(nn.Module):
         x = self.ln_f(x) # (B, T_compressed or T, C)
 
         if self.use_conv_compressor:
-            # HIERARCHICAL CAUSAL ALIGNMENT:
-            # We must shift the compressed hidden states so that H[i] predicts block i+1.
-            # Block 0 is predicted by the learned SOS token.
-            sos = self.sos_token.expand(B, 1, -1)
-            # Prepend SOS and drop the last hidden state to maintain sequence length (compressed)
-            x_shifted = torch.cat((sos, x), dim=1)[:, :-1, :]
-            
+            if self.use_sos is True:
+                # HIERARCHICAL CAUSAL ALIGNMENT:
+                # We must shift the compressed hidden states so that H[i] predicts block i+1.
+                # Block 0 is predicted by the learned SOS token.
+                sos = self.sos_token.expand(B, 1, -1)
+                # Prepend SOS and drop the last hidden state to maintain sequence length (compressed)
+                x_shifted = torch.cat((sos, x), dim=1)[:, :-1, :]
+            else:
+                x_shifted = x
             # Decompress back to byte-level sequence
             logits = self.decompressor(x_shifted) # (B, T_expanded, vocab_size)
             # Crop to original sequence length T
