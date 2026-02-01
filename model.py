@@ -297,14 +297,31 @@ class GPT(nn.Module):
                 # We must shift the compressed hidden states so that H[i] predicts block i+1.
                 # Block 0 is predicted by the learned SOS token.
                 sos = self.sos_token.expand(B, 1, -1)
-                # Prepend SOS and drop the last hidden state to maintain sequence length (compressed)
-                x_shifted = torch.cat((sos, x), dim=1)[:, :-1, :]
+            if self.use_sos is True:
+                # HIERARCHICAL CAUSAL ALIGNMENT:
+                # We must shift the compressed hidden states so that H[i] predicts block i+1.
+                # Block 0 is predicted by the learned SOS token.
+                sos = self.sos_token.expand(B, 1, -1)
+                
+                if targets is not None:
+                     # TRAINING: Shift to predict existing tokens
+                     # Prepend SOS and drop the last hidden state
+                    x_shifted = torch.cat((sos, x), dim=1)[:, :-1, :]
+                    logits = self.decompressor(x_shifted)
+                    # Crop to original sequence length T for loss calculation
+                    logits = logits[:, :T, :]
+                else:
+                    # INFERENCE: Predict future tokens
+                    # Use all hidden states including the last one
+                    x_shifted = torch.cat((sos, x), dim=1)
+                    logits = self.decompressor(x_shifted)
+                    # Do NOT crop. We want the future predictions.
             else:
                 x_shifted = x
-            # Decompress back to byte-level sequence
-            logits = self.decompressor(x_shifted) # (B, T_expanded, vocab_size)
-            # Crop to original sequence length T
-            logits = logits[:, :T, :]
+                logits = self.decompressor(x_shifted)
+                if targets is not None:
+                     logits = logits[:, :T, :]
+                     
         else:
             logits = self.lm_head(x) # (B, T, vocab_size)
 
@@ -321,13 +338,26 @@ class GPT(nn.Module):
         # Temp < 1.0 = more deterministic
         # idx is (B, T) array of indices in the current context
         for _ in range(max_new_tokens):
-            # crop idx to the last block_size tokens
+            # crop idx to the last block_size tokens, but ensure we keep a multiple of compression_rate if needed
+            # For now, just keep it simple.
             idx_cond = idx[:, -self.block_size:]
+            
             # get the predictions
             logits, loss = self(idx_cond)
-            # Correct prediction for the next token is at the last time step
-            logits = logits[:, -1, :] # becomes (B, C)
             
+            # The model outputs predictions for 0..N.
+            # output[t] is the prediction for idx[t].
+            # We want the prediction for idx[T] (the next token).
+            # This is located at index T in the logits.
+            # Note: idx_cond has length T_cond. We want logits[:, T_cond, :].
+            
+            next_token_idx = idx_cond.shape[1]
+            if next_token_idx < logits.shape[1]:
+                 logits = logits[:, next_token_idx, :] # (B, C)
+            else:
+                 # If logits are not long enough (should not happen with the fix above), take the last
+                 logits = logits[:, -1, :]
+
             # scale by temperature
             logits = logits / temperature
             # apply softmax to get probabilities
