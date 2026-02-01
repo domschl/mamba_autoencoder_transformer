@@ -9,10 +9,10 @@ from model import GPT, print_model_summary
 
 # Hyperparameters
 batch_size = 64 # how many independent sequences will we process in parallel?
-block_size = 256 # what is the maximum context length for predictions?
+block_size = 128 # what is the maximum context length for predictions?
 max_iters = 100000
 eval_interval = 512
-learning_rate = 1e-4
+learning_rate = 2e-4
 # pretrain_lr = 3e-4 # Removed for compound loss
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 if torch.backends.mps.is_available():
@@ -23,15 +23,16 @@ n_head = 12
 n_layer = 8
 dropout = 0.2
 use_conv_compressor = True
-kernel_size = 11
+compress_kernel_size = 11
+decompress_kernel_size = 1
 base_c = 48
-compression_rate = 4
+compression_rate = 2
 n_compress_layers = 2 # number of residual causal conv blocks
 n_decompress_layers = 0 # number of residual causal conv blocks
 compress_causal = True
 decompress_causal = True
 use_sos = True
-ae_loss_weight = 0.5 # Compound Loss Weight
+ae_loss_weight = 0.0 # Compound Loss Weight
 
 
 torch.manual_seed(1337)
@@ -57,8 +58,8 @@ print("Data loaded")
 
 # Model
 model = GPT(vocab_size, n_embd, block_size, n_head, n_layer, dropout, device, 
-            kernel_size=kernel_size, use_conv_compressor=use_conv_compressor, compression_rate=compression_rate, 
-            n_compress_layers=n_compress_layers, n_decompress_layers=n_decompress_layers, 
+            compress_kernel_size=compress_kernel_size, use_conv_compressor=use_conv_compressor, compression_rate=compression_rate, 
+            n_compress_layers=n_compress_layers, n_decompress_layers=n_decompress_layers, decompress_kernel_size=decompress_kernel_size,
             causal=compress_causal, decompress_causal=decompress_causal, use_sos=use_sos, base_c=base_c)
 m = model.to(device)
 print_model_summary(m)
@@ -143,7 +144,7 @@ for iter in range(max_iters):
     
     total_loss = loss_gpt
     if loss_ae is not None:
-        total_loss = total_loss + ae_loss_weight * loss_ae
+        total_loss = (1 - ae_loss_weight) * loss_gpt + ae_loss_weight * loss_ae
         
     optimizer.zero_grad(set_to_none=True)
     total_loss.backward()

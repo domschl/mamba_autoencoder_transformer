@@ -233,7 +233,9 @@ class GPT(nn.Module):
 
     def __init__(self, vocab_size, n_embd, block_size, n_head, n_layer, dropout, device, 
                  use_conv_compressor=False, compression_rate=4, 
-                 n_compress_layers=2, n_decompress_layers=0, kernel_size=3, causal=True, decompress_causal=False,
+                 n_compress_layers=2, n_decompress_layers=0, 
+                 compress_kernel_size=3, decompress_kernel_size=3,
+                 causal=True, decompress_causal=False,
                  use_sos=True, base_c=48):
         super().__init__()
         self.device = device
@@ -246,10 +248,10 @@ class GPT(nn.Module):
         if use_conv_compressor:
             self.ic = base_c * compression_rate
             self.oc = base_c * compression_rate
-            self.compressor = ConvByteCompressor(d_model=n_embd, ic=self.ic, oc=self.oc, kernel_size=kernel_size, 
+            self.compressor = ConvByteCompressor(d_model=n_embd, ic=self.ic, oc=self.oc, kernel_size=compress_kernel_size, 
                                                  compression_rate=compression_rate, n_layers=n_compress_layers, causal=causal)
             self.decompressor = ConvByteDecompressor(d_model=n_embd, vocab_size=vocab_size, ic=self.ic, oc=self.oc, 
-                                                     kernel_size=kernel_size, compression_rate=compression_rate, 
+                                                     kernel_size=decompress_kernel_size, compression_rate=compression_rate, 
                                                      n_layers=n_decompress_layers, causal=decompress_causal)
         else:
             self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
