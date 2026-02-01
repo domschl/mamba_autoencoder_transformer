@@ -12,20 +12,21 @@ batch_size = 32 # how many independent sequences will we process in parallel?
 block_size = 64 # what is the maximum context length for predictions?
 max_iters = 100000
 eval_interval = 512
-learning_rate = 1e-5
+learning_rate = 1e-4
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 if torch.backends.mps.is_available():
     device = 'mps'
 eval_iters = 50
-n_embd = 256
+n_embd = 512
 n_head = 8
-n_layer = 8
-dropout = 0.2
+n_layer = 24
+dropout = 0.1
 use_conv_compressor = True
-kernel_size = 5
-compression_rate = 4
+kernel_size = 11
+base_c = 32
+compression_rate = 8
 n_compress_layers = 4 # number of residual causal conv blocks
-n_decompress_layers = 0 # number of residual causal conv blocks
+n_decompress_layers = 2 # number of residual causal conv blocks
 compress_causal = True
 decompress_causal = False
 use_sos = False
@@ -56,7 +57,7 @@ print("Data loaded")
 model = GPT(vocab_size, n_embd, block_size, n_head, n_layer, dropout, device, 
             kernel_size=kernel_size, use_conv_compressor=use_conv_compressor, compression_rate=compression_rate, 
             n_compress_layers=n_compress_layers, n_decompress_layers=n_decompress_layers, 
-            causal=compress_causal, decompress_causal=decompress_causal, use_sos=use_sos)
+            causal=compress_causal, decompress_causal=decompress_causal, use_sos=use_sos, base_c=base_c)
 m = model.to(device)
 print_model_summary(m)
 

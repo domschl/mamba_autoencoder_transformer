@@ -65,7 +65,7 @@ class ConvByteCompressor(nn.Module):
         
         # 2. Residual Pre-processing
         self.residual_blocks = nn.ModuleList([
-            ResidualConvBlock(ic, causal=causal) for _ in range(n_layers)
+            ResidualConvBlock(ic, kernel_size=kernel_size, causal=causal) for _ in range(n_layers)
         ])
         
         # 3. Convolutional Stem: This replaces the tokenizer's compression
@@ -234,7 +234,7 @@ class GPT(nn.Module):
     def __init__(self, vocab_size, n_embd, block_size, n_head, n_layer, dropout, device, 
                  use_conv_compressor=False, compression_rate=4, 
                  n_compress_layers=2, n_decompress_layers=0, kernel_size=3, causal=True, decompress_causal=False,
-                 use_sos=True):
+                 use_sos=True, base_c=48):
         super().__init__()
         self.device = device
         self.block_size = block_size
@@ -243,8 +243,8 @@ class GPT(nn.Module):
         # each token directly reads off the logits for the next token from a lookup table
         self.use_conv_compressor = use_conv_compressor
         if use_conv_compressor:
-            self.ic = 256 * compression_rate
-            self.oc = 256 * compression_rate
+            self.ic = base_c * compression_rate
+            self.oc = base_c * compression_rate
             self.compressor = ConvByteCompressor(d_model=n_embd, ic=self.ic, oc=self.oc, kernel_size=kernel_size, 
                                                  compression_rate=compression_rate, n_layers=n_compress_layers, causal=causal)
             self.decompressor = ConvByteDecompressor(d_model=n_embd, vocab_size=vocab_size, ic=self.ic, oc=self.oc, 
