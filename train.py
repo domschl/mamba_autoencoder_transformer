@@ -76,6 +76,11 @@ if checkpoint_path:
         model.load_state_dict(checkpoint['model_state_dict'])
         if 'optimizer_state_dict' in checkpoint:
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            # Ensure optimizer state is on the correct device
+            for state in optimizer.state.values():
+                for k, v in state.items():
+                    if isinstance(v, torch.Tensor):
+                        state[k] = v.to(device)
         start_iter = checkpoint.get('iter', latest_step) + 1
         print(f"Loaded checkpoint from step {checkpoint.get('iter', latest_step)}")
     else:
@@ -91,6 +96,7 @@ if compile:
         if device == 'cuda':
             torch.set_float32_matmul_precision('high')
         model = torch.compile(model)
+        print(f"Model compiled on {device}.")
     else:
         print("torch.compile() not supported on this platform/version, skipping.")
 
