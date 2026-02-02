@@ -65,8 +65,15 @@ class Tokenizer:
         # Allow special tokens if needed, but for now just standard encode
         return self.enc.encode(s, allowed_special={"<|endoftext|>"})
 
-    def decode(self, bin):
-        return self.enc.decode(bin)
+    def decode(self, tokens, errors="replace"):
+        # Filter out tokens that are out of bounds for the BPE vocab
+        valid_tokens = [t for t in tokens if t < self.enc.n_vocab]
+        try:
+            # Try standard decode first
+            return self.enc.decode(valid_tokens)
+        except Exception:
+            # Fallback to byte-level decode with error replacement for invalid sequences
+            return self.enc.decode_bytes(valid_tokens).decode("utf-8", errors=errors)
 
 class DataLoader:
     def __init__(self, dataset_dir, tokenizer, block_size, batch_size, device='cpu', cache_dir=None, train_split=0.9):
@@ -187,7 +194,8 @@ class DataLoader:
             self.tensor_data = torch.empty(0, dtype=torch.long)
         print()
         self.log.info(f"Read {text_length} tokens from {len(files)} files")
-        self.tensor_data = self.tensor_data.to(self.device)
+        # Keep data on CPU to save VRAM; we'll move batches to device on-demand
+        self.tensor_data = self.tensor_data.to('cpu')
         return text_length
 
     def get_batch(self, split):
@@ -196,6 +204,7 @@ class DataLoader:
         ix = torch.randint(length - self.block_size - 1, (self.batch_size,))
         x = torch.stack([self.tensor_data[i+offset:i+offset+self.block_size] for i in ix])
         y = torch.stack([self.tensor_data[i+1+offset:i+1+offset+self.block_size] for i in ix])
+        # Move to device on-demand
         x, y = x.to(self.device), y.to(self.device)
         return x, y
 
@@ -248,6 +257,9 @@ class DataLoader:
             batch_x[i] = self.tensor_data[offset + pos:offset + pos + self.block_size]
             batch_y[i] = self.tensor_data[offset + pos + 1:offset + pos + 1 + self.block_size]
             state[i] = (offset, length, pos + self.block_size, False)
+        
+        # Move the batch to the correct device
+        batch_x, batch_y = batch_x.to(self.device), batch_y.to(self.device)
         return batch_x, batch_y, state
 
  

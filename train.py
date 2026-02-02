@@ -1,5 +1,6 @@
 import os
 import sys
+import gc
 import torch
 import time
 import math
@@ -87,6 +88,12 @@ if checkpoint_path:
         model.load_state_dict(checkpoint)
         start_iter = latest_step + 1
         print(f"Loaded model state from {checkpoint_path}, starting at step {start_iter}")
+    
+    # Cleanup to save RAM
+    del checkpoint
+    gc.collect()
+    if device == 'cuda':
+        torch.cuda.empty_cache()
 else:
     print("No checkpoint found. Starting from scratch.")
 
