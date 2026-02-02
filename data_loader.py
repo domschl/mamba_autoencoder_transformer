@@ -199,12 +199,34 @@ class DataLoader:
         x, y = x.to(self.device), y.to(self.device)
         return x, y
 
-    def get_random_book_start_and_length(self):
-        # Select a book, probability is proportional to length
-        book_idx = torch.multinomial(torch.tensor(self.tensor_lengths, dtype=torch.float), 1).item()
+    def get_random_book_start_and_length(self, split=None):
+        if split is None:
+            # Select any book, probability is proportional to length
+            book_idx = torch.multinomial(torch.tensor(self.tensor_lengths, dtype=torch.float), 1).item()
+            return self.tensor_offsets[book_idx], self.tensor_lengths[book_idx]
+        
+        # Filter books based on their starting offset relative to train_val_split
+        indices = []
+        lengths = []
+        for i, offset in enumerate(self.tensor_offsets):
+            if split == 'train':
+                if offset < self.train_val_split:
+                    indices.append(i)
+                    lengths.append(self.tensor_lengths[i])
+            else: # val
+                if offset >= self.train_val_split:
+                    indices.append(i)
+                    lengths.append(self.tensor_lengths[i])
+        
+        if not indices:
+            # Fallback if no books in split (should not happen if split is reasonable)
+            return self.get_random_book_start_and_length(None)
+            
+        rel_idx = torch.multinomial(torch.tensor(lengths, dtype=torch.float), 1).item()
+        book_idx = indices[rel_idx]
         return self.tensor_offsets[book_idx], self.tensor_lengths[book_idx]
 
-    def get_book_sequential_batch(self, state):
+    def get_book_sequential_batch(self, state, split=None):
         """
         returns a tuple of (batch_x, batch_y, state)
         state is a list of tuples of (offset, length, pos, new_book)
@@ -213,14 +235,14 @@ class DataLoader:
         if state is None:
             state = []
             for i in range(self.batch_size):
-                offset, length = self.get_random_book_start_and_length()
+                offset, length = self.get_random_book_start_and_length(split=split)
                 state.append((offset, length, 0, True))
         batch_x = torch.zeros((self.batch_size, self.block_size), dtype=torch.long, device=self.device)
         batch_y = torch.zeros((self.batch_size, self.block_size), dtype=torch.long, device=self.device)
         for i in range(self.batch_size):
             offset, length, pos, new_book = state[i]
             if pos + self.block_size + 1 >= length:
-                offset, length = self.get_random_book_start_and_length()
+                offset, length = self.get_random_book_start_and_length(split=split)
                 pos = 0
                 state[i] = (offset, length, pos, True)
             batch_x[i] = self.tensor_data[offset + pos:offset + pos + self.block_size]

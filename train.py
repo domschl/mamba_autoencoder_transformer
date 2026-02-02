@@ -100,9 +100,21 @@ def estimate_loss():
     model.eval()
     for split in ['train', 'val']:
         losses = torch.zeros(eval_iters)
+        eval_loader_state = None
+        eval_model_states = None
         for k in range(eval_iters):
-            X, Y = train_loader.get_batch(split)
-            logits, loss, _ = model(X, Y)
+            if attention_type == 'mamba':
+                X, Y, eval_loader_state = train_loader.get_book_sequential_batch(eval_loader_state, split=split)
+                # Reset states if new book started
+                for i, (_, _, _, new_book) in enumerate(eval_loader_state):
+                    if new_book and eval_model_states is not None:
+                        for layer_idx in range(len(eval_model_states)):
+                            if eval_model_states[layer_idx] is not None:
+                                eval_model_states[layer_idx][i] = 0
+                logits, loss, eval_model_states = model(X, Y, states=eval_model_states)
+            else:
+                X, Y = train_loader.get_batch(split)
+                logits, loss, _ = model(X, Y)
             losses[k] = loss.item()
         out[split] = losses.mean()
     model.train()
