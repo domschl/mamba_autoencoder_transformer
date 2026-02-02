@@ -187,11 +187,14 @@ for iter in range(start_iter, max_iters):
 
         # Generate sample
         context = torch.zeros((1, 1), dtype=torch.long, device=device)
-        for temperature in [1.0]:
+        for temperature in [0.8, 1.0]:
             print(f"Generating sample at step {iter}, temperature={temperature}...")
             # For generation, we don't carry the training state
             print(tokenizer.decode(model.generate(context, max_new_tokens=128, temperature=temperature)[0].tolist()))
             print("-" * 50)
+        gc.collect()
+        if device == 'cuda':
+            torch.cuda.empty_cache()
 
     # sample a batch of data
     if attention_type == 'mamba':
