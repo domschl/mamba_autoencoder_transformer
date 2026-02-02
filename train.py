@@ -96,7 +96,7 @@ if compile:
         if device == 'cuda':
             torch.set_float32_matmul_precision('high')
         model = torch.compile(model)
-        print(f"Model compiled on {device}.")
+        print(f"Model compiled on {model.device}.")
     else:
         print("torch.compile() not supported on this platform/version, skipping.")
 
