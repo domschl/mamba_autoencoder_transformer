@@ -24,8 +24,8 @@ n_embd = 256
 n_head = 8  
 n_layer = 4
 dropout = 0.1
-attention_type = 'mamba' # 'standard' or 'mamba'
-compile = True # use torch.compile() for speed
+attention_type = 'standard' # 'standard' or 'mamba'
+compile = False # use torch.compile() for speed
 
 torch.manual_seed(1337)
 random.seed(1337)
@@ -98,14 +98,16 @@ else:
     print("No checkpoint found. Starting from scratch.")
 
 if compile:
-    if hasattr(torch, 'compile') and sys.platform != 'darwin':
+    if hasattr(torch, 'compile'):
+        if sys.platform == 'darwin':
+            print("WARNING: torch.compile() is experimental on this platform")
         print("Compiling model...")
         if device == 'cuda':
             torch.set_float32_matmul_precision('high')
         model = torch.compile(model)
         print(f"Model compiled on {model.device}.")
     else:
-        print("torch.compile() not supported on this platform/version, skipping.")
+        print("torch.compile() not implemented on this platform/version, skipping.")
 
 @torch.no_grad()
 def estimate_loss():
@@ -127,7 +129,7 @@ def estimate_loss():
                 logits, loss, eval_model_states = model(X, Y, states=eval_model_states)
             else:
                 X, Y = train_loader.get_batch(split)
-                logits, loss, _ = model(X, Y)
+                logits, loss = model(X, Y)
             losses[k] = loss.item()
         out[split] = losses.mean()
     model.train()
@@ -211,7 +213,7 @@ for iter in range(start_iter, max_iters):
         if model_states is not None:
             model_states = [s.detach() if s is not None else None for s in model_states]
     else:
-        logits, loss, _ = model(xb, yb)
+        logits, loss = model(xb, yb)
     
     if mean_loss is not None:
         mean_loss = mean_loss * 0.9 + loss.item() * 0.1

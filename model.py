@@ -182,11 +182,11 @@ class Block(nn.Module):
             mamba_out, new_state = self.mamba(self.ln1(x), h=states)
             x = x + mamba_out
             x = x + self.ffwd(self.ln2(x))
+            return x, new_state
         else:
             x = x + self.sa(self.ln1(x))
             x = x + self.ffwd(self.ln2(x))
-            new_state = None
-        return x, new_state
+            return x
 
 class GPT(nn.Module):
 
