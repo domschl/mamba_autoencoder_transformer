@@ -41,13 +41,6 @@ train_loader = DataLoader(dataset_dir, tokenizer, block_size, batch_size, device
 # Model
 model = GPT(vocab_size, n_embd, block_size, n_head, n_layer, dropout, device, attention_type=attention_type).to(device)
 
-if compile:
-    if hasattr(torch, 'compile') and sys.platform != 'darwin':
-        print("Compiling model...")
-        model = torch.compile(model)
-    else:
-        print("torch.compile() not supported on this platform/version, skipping.")
-
 # print the number of parameters in the model
 print(str(sum(p.numel() for p in model.parameters())/1e6) + ' M parameters')
 
@@ -75,7 +68,8 @@ start_iter = 0
 checkpoint_path, latest_step = get_latest_checkpoint()
 if checkpoint_path:
     print(f"Found checkpoint: {checkpoint_path}. Loading...")
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    # Load to CPU first to be device-agnostic
+    checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
     
     # Support both old (state_dict only) and new (dict with metadata) checkpoints
     if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
@@ -90,6 +84,15 @@ if checkpoint_path:
         print(f"Loaded model state from {checkpoint_path}, starting at step {start_iter}")
 else:
     print("No checkpoint found. Starting from scratch.")
+
+if compile:
+    if hasattr(torch, 'compile') and sys.platform != 'darwin':
+        print("Compiling model...")
+        if device == 'cuda':
+            torch.set_float32_matmul_precision('high')
+        model = torch.compile(model)
+    else:
+        print("torch.compile() not supported on this platform/version, skipping.")
 
 @torch.no_grad()
 def estimate_loss():
@@ -127,10 +130,29 @@ for iter in range(start_iter, max_iters):
         checkpoint_dir = os.path.dirname(os.path.abspath(__file__))
         checkpoint_file = f"checkpoint_step_{iter}.pt"
         checkpoint_path = os.path.join(checkpoint_dir, checkpoint_file)
+        
+        # Un-wrap compiled model for saving
+        raw_model = model._orig_mod if hasattr(model, '_orig_mod') else model
+        
+        # Offload to CPU for cross-platform compatibility
+        model_state_dict = {k: v.cpu() for k, v in raw_model.state_dict().items()}
+        
+        # Helper to offload dict of tensors (like optimizer state)
+        def to_cpu(obj):
+            if isinstance(obj, torch.Tensor):
+                return obj.cpu()
+            if isinstance(obj, dict):
+                return {k: to_cpu(v) for k, v in obj.items()}
+            if isinstance(obj, list):
+                return [to_cpu(v) for v in obj]
+            return obj
+            
+        optimizer_state_dict = to_cpu(optimizer.state_dict())
+        
         checkpoint = {
             'iter': iter,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
+            'model_state_dict': model_state_dict,
+            'optimizer_state_dict': optimizer_state_dict,
             'losses': losses,
             'attention_type': attention_type,
         }
