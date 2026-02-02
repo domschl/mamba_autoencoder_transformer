@@ -24,6 +24,7 @@ n_head = 8
 n_layer = 4
 dropout = 0.1
 attention_type = 'mamba' # 'standard' or 'mamba'
+compile = True # use torch.compile() for speed
 
 torch.manual_seed(1337)
 random.seed(1337)
@@ -39,6 +40,13 @@ train_loader = DataLoader(dataset_dir, tokenizer, block_size, batch_size, device
 
 # Model
 model = GPT(vocab_size, n_embd, block_size, n_head, n_layer, dropout, device, attention_type=attention_type).to(device)
+
+if compile:
+    if hasattr(torch, 'compile') and sys.platform != 'darwin':
+        print("Compiling model...")
+        model = torch.compile(model)
+    else:
+        print("torch.compile() not supported on this platform/version, skipping.")
 
 # print the number of parameters in the model
 print(str(sum(p.numel() for p in model.parameters())/1e6) + ' M parameters')
