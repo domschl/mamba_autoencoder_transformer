@@ -11,7 +11,7 @@ from data_loader import Tokenizer, DataLoader
 from model import GPT
 
 # Hyperparameters
-batch_size = 16 # how many independent sequences will we process in parallel?
+batch_size = 64 # how many independent sequences will we process in parallel?
 block_size = 128 # what is the maximum context length for predictions?
 max_iters = 100000
 eval_interval = 200
@@ -226,7 +226,10 @@ for iter in range(start_iter, max_iters):
     optimizer.zero_grad(set_to_none=True)
     loss.backward()
     optimizer.step()
-    print(f"\rstep {iter}: train loss {loss.item():.4f}", end="")
+    if time.time() - last_output > 1:
+        print(f"\rstep {iter}: train loss {loss.item():.4f}", end="")
+        sys.stdout.flush()
+        last_output = time.time()
 
 print()
 print(f"Training finished in {time.time() - start_time:.2f} seconds")
