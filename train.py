@@ -24,7 +24,7 @@ n_embd = 256
 n_head = 8  
 n_layer = 4
 dropout = 0.1
-attention_type = 'standard' # 'standard' or 'mamba'
+attention_type = 'mamba' # 'standard' or 'mamba'
 compile = False # use torch.compile() for speed
 
 torch.manual_seed(1337)
