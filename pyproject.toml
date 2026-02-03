@@ -1,7 +1,7 @@
 [project]
-name = "arnold-transformer"
+name = "mamba_autoencoder_transformer"
 version = "0.1.0"
-description = "Transformer from scratch as test-harness for the Arnold Activation Function"
+description = "Transformer in autoencoder configuration with bottleneck using standard and mamba attention"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
