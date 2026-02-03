@@ -20,11 +20,11 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 if torch.backends.mps.is_available():
     device = 'mps'
 eval_iters = 50
-n_embd = 256
-n_head = 8  
-n_layer = 4
+n_embd:int|list[int] = [256, 256, 192, 128, 128, 192, 256, 256]  # Optional bottleneck architecture
+n_head = 8
+n_layer = 8
 dropout = 0.1
-attention_type = 'mamba' # 'standard' or 'mamba'
+attention_type:str|list[str] = ['mamba', 'standard', 'standard', 'standard', 'standard', 'standard', 'standard', 'standard'] # Optional: List of length n_layer with elements 'standard' or 'mamba'
 compile = False # use torch.compile() for speed
 
 torch.manual_seed(1337)
@@ -118,7 +118,7 @@ def estimate_loss():
         eval_loader_state = None
         eval_model_states = None
         for k in range(eval_iters):
-            if attention_type == 'mamba':
+            if isinstance(attention_type, list) and 'mamba' in attention_type or attention_type == 'mamba':
                 X, Y, eval_loader_state = train_loader.get_book_sequential_batch(eval_loader_state, split=split)
                 # Reset states if new book started
                 for i, (_, _, _, new_book) in enumerate(eval_loader_state):
@@ -129,7 +129,7 @@ def estimate_loss():
                 logits, loss, eval_model_states = model(X, Y, states=eval_model_states)
             else:
                 X, Y = train_loader.get_batch(split)
-                logits, loss = model(X, Y)
+                logits, loss, _ = model(X, Y)
             losses[k] = loss.item()
         out[split] = losses.mean()
     model.train()
@@ -197,7 +197,7 @@ for iter in range(start_iter, max_iters):
             torch.cuda.empty_cache()
 
     # sample a batch of data
-    if attention_type == 'mamba':
+    if isinstance(attention_type, list) and 'mamba' in attention_type or attention_type == 'mamba':
         xb, yb, loader_state = train_loader.get_book_sequential_batch(loader_state)
         # Check for new book starts to reset states
         if model_states is not None:
@@ -209,15 +209,11 @@ for iter in range(start_iter, max_iters):
     else:
         xb, yb = train_loader.get_batch('train')
 
-    # evaluate the loss
-    if attention_type == 'mamba':
-        logits, loss, model_states = model(xb, yb, states=model_states)
-        # Detach states to prevent backpropping through time across batches
-        if model_states is not None:
-            model_states = [s.detach() if s is not None else None for s in model_states]
-    else:
-        logits, loss = model(xb, yb)
-    
+    logits, loss, model_states = model(xb, yb, states=model_states)
+    # Detach states to prevent backpropping through time across batches
+    if model_states is not None:
+        model_states = [s.detach() if s is not None else None for s in model_states]
+
     if mean_loss is not None:
         mean_loss = mean_loss * 0.9 + loss.item() * 0.1
         if last_output is None or time.time() - last_output > 1:

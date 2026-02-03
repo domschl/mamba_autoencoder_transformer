@@ -135,24 +135,16 @@ class MambaBlock(nn.Module):
 class FeedForward(nn.Module):
     """ a simple linear layer followed by a non-linearity """
 
-    def __init__(self, n_embd, dropout, activation_type='relu'):
+    def __init__(self, n_embd, dropout, out_n_embd=None):
         super().__init__()
-        self.activation_type = activation_type
+        if out_n_embd is None:
+            out_n_embd = n_embd
         layers = [
             nn.Linear(n_embd, 4 * n_embd),
-        ]
-        
-        if activation_type == 'arnold':
-            from arnold import ArnoldActivation # assuming it exists or handled elsewhere
-            self.activation = ArnoldActivation()
-            layers.append(self.activation)
-        else:
-            layers.append(nn.ReLU())
-            
-        layers.extend([
-            nn.Linear(4 * n_embd, n_embd),
+            nn.ReLU(),
+            nn.Linear(4 * n_embd, out_n_embd),
             nn.Dropout(dropout),
-        ])
+        ]
         
         self.net = nn.Sequential(*layers)
 
@@ -163,16 +155,23 @@ class FeedForward(nn.Module):
 class Block(nn.Module):
     """ Transformer block: communication followed by computation """
 
-    def __init__(self, n_embd, n_head, block_size, dropout, activation_type='relu', 
-                 attention_type='standard'):
+    def __init__(self, n_embd, n_head, block_size, dropout, attention_type='standard', out_n_embd:int|None=None):
         # n_embd: embedding dimension, n_head: the number of heads we'd like
         super().__init__()
         head_size = n_embd // n_head
+        if out_n_embd is None:
+            out_n_embd = n_embd
         if attention_type == 'standard':
             self.sa = MultiHeadAttention(n_head, head_size, n_embd, block_size, dropout)
-        if attention_type == 'mamba':
+        elif attention_type == 'mamba':
             self.mamba = MambaBlock(n_embd)
-        self.ffwd = FeedForward(n_embd, dropout, activation_type=activation_type)
+        else:
+            raise ValueError(f"Unknown attention type: {attention_type}")
+        self.ffwd = FeedForward(n_embd, dropout, out_n_embd = out_n_embd)
+        if n_embd != out_n_embd:
+            self.no_residual = True
+        else:
+            self.no_residual = False
         self.ln1 = nn.LayerNorm(n_embd)
         self.ln2 = nn.LayerNorm(n_embd)
         self.attention_type = attention_type
@@ -185,23 +184,46 @@ class Block(nn.Module):
             return x, new_state
         else:
             x = x + self.sa(self.ln1(x))
-            x = x + self.ffwd(self.ln2(x))
-            return x
+            if self.no_residual:
+                x = self.ffwd(self.ln2(x))  # We can't use residual connection if the dimensions don't match
+            else:
+                x = x + self.ffwd(self.ln2(x))
+            return x, states
 
 class GPT(nn.Module):
 
-    def __init__(self, vocab_size, n_embd, block_size, n_head, n_layer, dropout, device, attention_type='standard'):
+    def __init__(self, vocab_size, n_embd:int|list[int], block_size, n_head:int|list[int], n_layer, dropout, device, attention_type:str|list[str]='standard'):
         super().__init__()
         self.device = device
         self.block_size = block_size
-        self.attention_type = attention_type
+        self.attention_type:list[str] = []
+        if isinstance(attention_type, list):
+            if len(attention_type) != n_layer:
+                raise ValueError("attention_type must be a list of length n_layer")
+            self.attention_type = attention_type
+        else:
+            self.attention_type = [attention_type] * n_layer
+
+        if isinstance(n_embd, list):
+            if len(n_embd) != n_layer:
+                raise ValueError("n_embd must be a list of length n_layer")
+            n_embd = n_embd
+        else:
+            n_embd = [n_embd] * n_layer
+
+        if isinstance(n_head, list):
+            if len(n_head) != n_layer:
+                raise ValueError("n_head must be a list of length n_layer")
+            n_head = n_head
+        else:
+            n_head = [n_head] * n_layer
 
         # each token directly reads off the logits for the next token from a lookup table
-        self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
-        self.positional_encoding_table = nn.Embedding(block_size, n_embd)
-        self.blocks = nn.ModuleList([Block(n_embd, n_head, block_size, dropout, attention_type=attention_type) for i in range(n_layer)])
-        self.ln_f = nn.LayerNorm(n_embd) # final layer norm
-        self.lm_head = nn.Linear(n_embd, vocab_size)
+        self.token_embedding_table = nn.Embedding(vocab_size, n_embd[0])
+        self.positional_encoding_table = nn.Embedding(block_size, n_embd[0])
+        self.blocks = nn.ModuleList([Block(n_embd[i], n_head[i], block_size, dropout, out_n_embd=n_embd[(i+1)%n_layer], attention_type=attention_type[i]) for i in range(n_layer)])
+        self.ln_f = nn.LayerNorm(n_embd[0]) # final layer norm (n_embd[(i+1)%n_layer] is the last element of n_embd, hence again index 0)
+        self.lm_head = nn.Linear(n_embd[0], vocab_size)
 
     def forward(self, idx, targets=None, states=None):
         B, T = idx.shape
@@ -211,16 +233,16 @@ class GPT(nn.Module):
         pos_emb = self.positional_encoding_table(torch.arange(T, device=self.device)) # (T,C)
         x = tok_emb + pos_emb # (B,T,C)
         
+        if states is None:
+            states = [None] * len(self.blocks)
         if self.attention_type == 'mamba':
-            if states is None:
-                states = [None] * len(self.blocks)
             for i, block in enumerate(self.blocks):
                 x, s_new = block(x, states=states[i])
                 states[i] = s_new
         else:
-            for block in self.blocks:
-                x = block(x)
-            
+            for i, block in enumerate(self.blocks):
+                x, _ = block(x, states=states[i])  # States not modified
+        
         x = self.ln_f(x) # (B,T,C)
         logits = self.lm_head(x) # (B,T,vocab_size)
 
@@ -234,7 +256,7 @@ class GPT(nn.Module):
         if self.attention_type == 'mamba':
             return logits, loss, states
         else:
-            return logits, loss
+            return logits, loss, states
 
     def generate(self, idx, max_new_tokens, temperature=1.0):
         # Temp > 1.0 = more random
@@ -245,10 +267,7 @@ class GPT(nn.Module):
             # crop idx to the last block_size tokens
             idx_cond = idx[:, -self.block_size:]
             # get the predictions
-            if self.attention_type == 'mamba':
-                logits, loss, states = self(idx_cond, states=states)
-            else:
-                logits, loss = self(idx_cond)
+            logits, loss, states = self(idx_cond, states=states)
             # focus only on the last time step
             logits = logits[:, -1, :] # becomes (B, C)
             # scale by temperature
