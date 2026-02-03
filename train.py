@@ -63,7 +63,7 @@ def get_current_configuration():
                 'device': device,
                 'compile': compile,
                 'dataset_dir': dataset_dir
-            }, f)
+            }, f, indent=4)
     return device, compile, config, dataset_dir
 
 device, compile, config, dataset_dir = get_current_configuration()
