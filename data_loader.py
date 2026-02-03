@@ -208,7 +208,7 @@ class DataLoader:
         x, y = x.to(self.device), y.to(self.device)
         return x, y
 
-    def get_random_book_start_and_length(self, split=None):
+    def get_random_book_start_and_length(self, split=None, announce_new_book=False):
         if split is None:
             # Select any book, probability is proportional to length
             book_idx = torch.multinomial(torch.tensor(self.tensor_lengths, dtype=torch.float), 1).item()
@@ -232,10 +232,15 @@ class DataLoader:
             return self.get_random_book_start_and_length(None)
             
         rel_idx = torch.multinomial(torch.tensor(lengths, dtype=torch.float), 1).item()
+
+        if announce_new_book:
+            filename = self.filenames[indices[rel_idx]]
+            print(f"Studying: {filename}\n")
+
         book_idx = indices[rel_idx]
         return self.tensor_offsets[book_idx], self.tensor_lengths[book_idx]
 
-    def get_book_sequential_batch(self, state, split=None):
+    def get_book_sequential_batch(self, state, split=None, announce_new_book=False):
         """
         returns a tuple of (batch_x, batch_y, state)
         state is a list of tuples of (offset, length, pos, new_book)
@@ -244,7 +249,7 @@ class DataLoader:
         if state is None:
             state = []
             for i in range(self.batch_size):
-                offset, length = self.get_random_book_start_and_length(split=split)
+                offset, length = self.get_random_book_start_and_length(split=split, announce_new_book=False)
                 state.append((offset, length, 0, True))
         batch_x = torch.zeros((self.batch_size, self.block_size), dtype=torch.long, device=self.device)
         batch_y = torch.zeros((self.batch_size, self.block_size), dtype=torch.long, device=self.device)
@@ -252,7 +257,7 @@ class DataLoader:
             offset, length, pos, _ = state[i]
             this_is_new_book = False
             if pos + self.block_size + 1 >= length:
-                offset, length = self.get_random_book_start_and_length(split=split)
+                offset, length = self.get_random_book_start_and_length(split=split, announce_new_book=announce_new_book)
                 pos = 0
                 this_is_new_book = True
             batch_x[i] = self.tensor_data[offset + pos:offset + pos + self.block_size]

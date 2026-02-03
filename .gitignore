@@ -11,6 +11,7 @@ wheels/
 dataset/
 
 # Train
+current_configuration.json
 checkpoint*
 
 # Virtual environments

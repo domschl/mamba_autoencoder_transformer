@@ -7,36 +7,72 @@ import math
 import random
 import glob
 import re
+import json
 from data_loader import Tokenizer, DataLoader
 from model import GPT
 
-# Hyperparameters
-config = {
-    'batch_size': 64, # how many independent sequences will we process in parallel?
-    'block_size': 128, # what is the maximum context length for predictions?
-    'max_iters': 100000,
-    'eval_interval': 200,
-    'learning_rate': 3e-4,
-    'eval_iters': 50,
-    'n_embd': [256, 256, 192, 128, 128, 192, 256, 256],  # Optional bottleneck architecture
-    'n_head': 8,
-    'n_layer': 8,
-    'dropout': 0.1,
-    'attention_type': ['mamba', 'standard', 'standard', 'mamba', 'standard', 'standard', 'standard', 'standard'], # Optional: List of length n_layer with elements 'standard' or 'mamba'
-}
+def get_current_configuration():
+    configuration_version = 1
+    valid_configuration = True
+    if os.path.exists("current_configuration.json"):
+        with open("current_configuration.json", "r") as f:
+            try:
+                current_configuration = json.load(f)
+                if current_configuration['configuration_version'] != configuration_version:
+                    print("Configuration version mismatch. Please update the configuration.")
+                    valid_configuration = False
+            except Exception as e:
+                print(f"Error loading configuration: {e}, incompatible configuration, resetting to default configuration.")
+                valid_configuration = False
 
-# Calculated or environment-dependent variables
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-if torch.backends.mps.is_available():
-    device = 'mps'
-compile = False # use torch.compile() for speed
+    if valid_configuration:
+        try:
+            config = current_configuration['config']
+            device = current_configuration['device']
+            compile = current_configuration['compile']
+            dataset_dir = current_configuration['dataset_dir']
+        except Exception as e:
+            print(f"Error loading configuration: {e}, incompatible configuration, resetting to default configuration.")
+            valid_configuration = False
+    if valid_configuration is False:
+        # Calculated or environment-dependent variables
+        print("Invalid or new configuration in current_configuration.json. Creating new configuration.")
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        if torch.backends.mps.is_available():
+            device = 'mps'
+        compile = False # use torch.compile() for speed
+        dataset_dir = os.path.join(os.path.dirname(__file__), 'dataset')
+        # Hyperparameters
+        config = {
+            'batch_size': 64, # how many independent sequences will we process in parallel?
+            'block_size': 128, # what is the maximum context length for predictions?
+            'max_iters': 100000,
+            'eval_interval': 200,
+            'learning_rate': 3e-4,
+            'eval_iters': 50,
+            'n_embd': [256, 256, 192, 128, 128, 192, 256, 256],  # Optional bottleneck architecture
+            'n_head': 8,
+            'n_layer': 8,
+            'dropout': 0.1,
+            'attention_type': ['mamba', 'standard', 'standard', 'mamba', 'standard', 'standard', 'standard', 'standard'], # Optional: List of length n_layer with elements 'standard' or 'mamba'
+        }
+        with open("current_configuration.json", "w") as f:
+            json.dump({
+                'configuration_version': configuration_version,
+                'config': config,
+                'device': device,
+                'compile': compile,
+                'dataset_dir': dataset_dir
+            }, f)
+    return device, compile, config, dataset_dir
+
+device, compile, config, dataset_dir = get_current_configuration()
+announce_new_book = True
 
 torch.manual_seed(1337)
 random.seed(1337)
 
 # Load data
-dataset_dir = os.path.join(os.path.dirname(__file__), 'dataset')
-
 tokenizer = Tokenizer()
 config['vocab_size'] = tokenizer.vocab_size
 
@@ -170,7 +206,7 @@ def estimate_loss():
         eval_model_states = None
         for k in range(config['eval_iters']):
             if isinstance(config['attention_type'], list) and 'mamba' in config['attention_type'] or config['attention_type'] == 'mamba':
-                X, Y, eval_loader_state = train_loader.get_book_sequential_batch(eval_loader_state, split=split)
+                X, Y, eval_loader_state = train_loader.get_book_sequential_batch(eval_loader_state, split=split, announce_new_book=False)
                 # Reset states if new book started
                 for i, (_, _, _, new_book) in enumerate(eval_loader_state):
                     if new_book and eval_model_states is not None:
@@ -249,7 +285,7 @@ for iter in range(start_iter, config['max_iters']):
 
     # sample a batch of data
     if isinstance(config['attention_type'], list) and 'mamba' in config['attention_type'] or config['attention_type'] == 'mamba':
-        xb, yb, loader_state = train_loader.get_book_sequential_batch(loader_state)
+        xb, yb, loader_state = train_loader.get_book_sequential_batch(loader_state, announce_new_book=announce_new_book)
         # Check for new book starts to reset states
         if model_states is not None:
             for i, (_, _, _, new_book) in enumerate(loader_state):
