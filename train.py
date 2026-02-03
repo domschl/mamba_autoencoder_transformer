@@ -64,6 +64,8 @@ def get_current_configuration():
                 'compile': compile,
                 'dataset_dir': dataset_dir
             }, f, indent=4)
+        print("Please review configuration file: current_configuration.json")
+        sys.exit(0)
     return device, compile, config, dataset_dir
 
 device, compile, config, dataset_dir = get_current_configuration()
