@@ -208,6 +208,9 @@ class DataLoader:
         x, y = x.to(self.device), y.to(self.device)
         return x, y
 
+    def get_dataset_batch_count(self):
+        return len(self.tensor_data) // self.block_size
+
     def get_random_book_start_and_length(self, split=None, announce_new_book=False):
         if split is None:
             # Select any book, probability is proportional to length

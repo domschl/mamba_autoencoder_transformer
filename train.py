@@ -83,6 +83,7 @@ config['vocab_size'] = tokenizer.vocab_size
 
 # Create data loader
 train_loader = DataLoader(dataset_dir, tokenizer, config['block_size'], config['batch_size'], device, cache_dir=dataset_dir, train_split=0.9)
+batches_per_epoch = train_loader.get_dataset_batch_count()
 
 # Model
 model = GPT(
@@ -173,7 +174,8 @@ if checkpoint_path:
                             if isinstance(v, torch.Tensor):
                                 state[k] = v.to(device)
                 start_iter = checkpoint.get('iter', latest_step) + 1
-                print(f"Loaded checkpoint from step {checkpoint.get('iter', latest_step)}")
+                loaded_epoch = (checkpoint.get('iter', latest_step) * config['batch_size']) / batches_per_epoch
+                print(f"Loaded checkpoint from step {checkpoint.get('iter', latest_step)} (epoch {loaded_epoch:.4f})")
         else:
             print("Checkpoint has no config information. Loading state_dict anyway (legacy support).")
             model.load_state_dict(checkpoint['model_state_dict'])
@@ -237,13 +239,14 @@ model_states = None
 
 for iter in range(start_iter, config['max_iters']):
 
+    epoch = (iter * config['batch_size']) / batches_per_epoch
     # every once in a while evaluate the loss on train and val sets
     if iter % config['eval_interval'] == 0 or iter == config['max_iters'] - 1:
         losses = estimate_loss()
         mean_loss = losses['train']
         print()
         print("=" * 50)
-        print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+        print(f"step {iter} (epoch {epoch:.4f}): train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
         
         # Save checkpoint
         checkpoint_dir = os.path.dirname(os.path.abspath(__file__))
@@ -309,7 +312,7 @@ for iter in range(start_iter, config['max_iters']):
     if mean_loss is not None:
         mean_loss = mean_loss * 0.9 + loss.item() * 0.1
         if last_output is None or time.time() - last_output > 1:
-            print(f"\rstep {iter}: train loss {loss.item():.4f}, mean loss {mean_loss:.4f}", end="")
+            print(f"\rstep {iter} (epoch {epoch:.2f}): train loss {loss.item():.4f}, mean loss {mean_loss:.4f}", end="")
             sys.stdout.flush()
             last_output = time.time()
     else:
