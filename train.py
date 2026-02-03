@@ -40,7 +40,10 @@ def get_current_configuration():
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         if torch.backends.mps.is_available():
             device = 'mps'
-        compile = False # use torch.compile() for speed
+        if device == 'cuda':
+            compile = True # use torch.compile() for speed
+        else:
+            compile = False
         dataset_dir = os.path.join(os.path.dirname(__file__), 'dataset')
         # Hyperparameters
         config = {
