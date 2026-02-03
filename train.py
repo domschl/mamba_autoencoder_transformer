@@ -24,7 +24,7 @@ n_embd:int|list[int] = [256, 256, 192, 128, 128, 192, 256, 256]  # Optional bott
 n_head = 8
 n_layer = 8
 dropout = 0.1
-attention_type:str|list[str] = ['mamba', 'standard', 'standard', 'standard', 'standard', 'standard', 'standard', 'standard'] # Optional: List of length n_layer with elements 'standard' or 'mamba'
+attention_type:str|list[str] = ['mamba', 'standard', 'standard', 'mamba', 'standard', 'standard', 'standard', 'standard'] # Optional: List of length n_layer with elements 'standard' or 'mamba'
 compile = False # use torch.compile() for speed
 
 torch.manual_seed(1337)
@@ -70,10 +70,17 @@ checkpoint_path, latest_step = get_latest_checkpoint()
 if checkpoint_path:
     print(f"Found checkpoint: {checkpoint_path}. Loading...")
     # Load to CPU first to be device-agnostic
-    checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+    except Exception as e:
+        print(f"Error loading checkpoint: {e}, incompatible model, restarting training.")
+        checkpoint = None
     
-    # Support both old (state_dict only) and new (dict with metadata) checkpoints
-    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+    if checkpoint is None:
+        start_iter = 0
+        checkpoint_path = None
+        latest_step = None
+    else:
         model.load_state_dict(checkpoint['model_state_dict'])
         if 'optimizer_state_dict' in checkpoint:
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
@@ -84,10 +91,6 @@ if checkpoint_path:
                         state[k] = v.to(device)
         start_iter = checkpoint.get('iter', latest_step) + 1
         print(f"Loaded checkpoint from step {checkpoint.get('iter', latest_step)}")
-    else:
-        model.load_state_dict(checkpoint)
-        start_iter = latest_step + 1
-        print(f"Loaded model state from {checkpoint_path}, starting at step {start_iter}")
     
     # Cleanup to save RAM
     del checkpoint
