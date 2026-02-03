@@ -11,20 +11,24 @@ from data_loader import Tokenizer, DataLoader
 from model import GPT
 
 # Hyperparameters
-batch_size = 64 # how many independent sequences will we process in parallel?
-block_size = 128 # what is the maximum context length for predictions?
-max_iters = 100000
-eval_interval = 200
-learning_rate = 3e-4
+config = {
+    'batch_size': 64, # how many independent sequences will we process in parallel?
+    'block_size': 128, # what is the maximum context length for predictions?
+    'max_iters': 100000,
+    'eval_interval': 200,
+    'learning_rate': 3e-4,
+    'eval_iters': 50,
+    'n_embd': [256, 256, 192, 128, 128, 192, 256, 256],  # Optional bottleneck architecture
+    'n_head': 8,
+    'n_layer': 8,
+    'dropout': 0.1,
+    'attention_type': ['mamba', 'standard', 'standard', 'mamba', 'standard', 'standard', 'standard', 'standard'], # Optional: List of length n_layer with elements 'standard' or 'mamba'
+}
+
+# Calculated or environment-dependent variables
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 if torch.backends.mps.is_available():
     device = 'mps'
-eval_iters = 50
-n_embd:int|list[int] = [256, 256, 192, 128, 128, 192, 256, 256]  # Optional bottleneck architecture
-n_head = 8
-n_layer = 8
-dropout = 0.1
-attention_type:str|list[str] = ['mamba', 'standard', 'standard', 'mamba', 'standard', 'standard', 'standard', 'standard'] # Optional: List of length n_layer with elements 'standard' or 'mamba'
 compile = False # use torch.compile() for speed
 
 torch.manual_seed(1337)
@@ -34,19 +38,28 @@ random.seed(1337)
 dataset_dir = os.path.join(os.path.dirname(__file__), 'dataset')
 
 tokenizer = Tokenizer()
-vocab_size = tokenizer.vocab_size
+config['vocab_size'] = tokenizer.vocab_size
 
 # Create data loader
-train_loader = DataLoader(dataset_dir, tokenizer, block_size, batch_size, device, cache_dir=dataset_dir, train_split=0.9)
+train_loader = DataLoader(dataset_dir, tokenizer, config['block_size'], config['batch_size'], device, cache_dir=dataset_dir, train_split=0.9)
 
 # Model
-model = GPT(vocab_size, n_embd, block_size, n_head, n_layer, dropout, device, attention_type=attention_type).to(device)
+model = GPT(
+    vocab_size=config['vocab_size'], 
+    n_embd=config['n_embd'], 
+    block_size=config['block_size'], 
+    n_head=config['n_head'], 
+    n_layer=config['n_layer'], 
+    dropout=config['dropout'], 
+    device=device, 
+    attention_type=config['attention_type']
+).to(device)
 
 # print the number of parameters in the model
 print(str(sum(p.numel() for p in model.parameters())/1e6) + ' M parameters')
 
 # Optimizer
-optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+optimizer = torch.optim.AdamW(model.parameters(), lr=config['learning_rate'])
 
 # Check for existing checkpoints
 def get_latest_checkpoint():
@@ -81,16 +94,51 @@ if checkpoint_path:
         checkpoint_path = None
         latest_step = None
     else:
-        model.load_state_dict(checkpoint['model_state_dict'])
-        if 'optimizer_state_dict' in checkpoint:
-            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            # Ensure optimizer state is on the correct device
-            for state in optimizer.state.values():
-                for k, v in state.items():
-                    if isinstance(v, torch.Tensor):
-                        state[k] = v.to(device)
-        start_iter = checkpoint.get('iter', latest_step) + 1
-        print(f"Loaded checkpoint from step {checkpoint.get('iter', latest_step)}")
+        # Validate hyperparameters
+        checkpoint_config = checkpoint.get('config')
+        if checkpoint_config:
+            mismatch = False
+            # Parameters that MUST match for the model to be compatible
+            critical_params = ['n_embd', 'n_head', 'n_layer', 'block_size', 'vocab_size', 'attention_type']
+            for param in critical_params:
+                if checkpoint_config.get(param) != config.get(param):
+                    print(f"CRITICAL Hyperparameter mismatch for {param}: checkpoint={checkpoint_config.get(param)}, current={config.get(param)}")
+                    mismatch = True
+            
+            if mismatch:
+                print("Incompatible hyperparameters found in checkpoint. Restarting training from scratch.")
+                start_iter = 0
+                checkpoint_path = None
+                latest_step = None
+                # Reset model to ensure it's fresh (though it already is)
+                model = GPT(
+                    vocab_size=config['vocab_size'], 
+                    n_embd=config['n_embd'], 
+                    block_size=config['block_size'], 
+                    n_head=config['n_head'], 
+                    n_layer=config['n_layer'], 
+                    dropout=config['dropout'], 
+                    device=device, 
+                    attention_type=config['attention_type']
+                ).to(device)
+                optimizer = torch.optim.AdamW(model.parameters(), lr=config['learning_rate'])
+            else:
+                model.load_state_dict(checkpoint['model_state_dict'])
+                if 'optimizer_state_dict' in checkpoint:
+                    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+                    # Ensure optimizer state is on the correct device
+                    for state in optimizer.state.values():
+                        for k, v in state.items():
+                            if isinstance(v, torch.Tensor):
+                                state[k] = v.to(device)
+                start_iter = checkpoint.get('iter', latest_step) + 1
+                print(f"Loaded checkpoint from step {checkpoint.get('iter', latest_step)}")
+        else:
+            print("Checkpoint has no config information. Loading state_dict anyway (legacy support).")
+            model.load_state_dict(checkpoint['model_state_dict'])
+            if 'optimizer_state_dict' in checkpoint:
+                optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            start_iter = checkpoint.get('iter', latest_step) + 1
     
     # Cleanup to save RAM
     del checkpoint
@@ -117,11 +165,11 @@ def estimate_loss():
     out = {}
     model.eval()
     for split in ['train', 'val']:
-        losses = torch.zeros(eval_iters)
+        losses = torch.zeros(config['eval_iters'])
         eval_loader_state = None
         eval_model_states = None
-        for k in range(eval_iters):
-            if isinstance(attention_type, list) and 'mamba' in attention_type or attention_type == 'mamba':
+        for k in range(config['eval_iters']):
+            if isinstance(config['attention_type'], list) and 'mamba' in config['attention_type'] or config['attention_type'] == 'mamba':
                 X, Y, eval_loader_state = train_loader.get_book_sequential_batch(eval_loader_state, split=split)
                 # Reset states if new book started
                 for i, (_, _, _, new_book) in enumerate(eval_loader_state):
@@ -139,17 +187,17 @@ def estimate_loss():
     return out
 
 # Training loop
-print(f"Starting training with {attention_type} attention...")
+print(f"Starting training with {config['attention_type']} attention...")
 start_time = time.time()
 last_output = None
 mean_loss = None
 loader_state = None
 model_states = None
 
-for iter in range(start_iter, max_iters):
+for iter in range(start_iter, config['max_iters']):
 
     # every once in a while evaluate the loss on train and val sets
-    if iter % eval_interval == 0 or iter == max_iters - 1:
+    if iter % config['eval_interval'] == 0 or iter == config['max_iters'] - 1:
         losses = estimate_loss()
         mean_loss = losses['train']
         print()
@@ -184,7 +232,7 @@ for iter in range(start_iter, max_iters):
             'model_state_dict': model_state_dict,
             'optimizer_state_dict': optimizer_state_dict,
             'losses': losses,
-            'attention_type': attention_type,
+            'config': config,
         }
         torch.save(checkpoint, checkpoint_path)
 
@@ -200,7 +248,7 @@ for iter in range(start_iter, max_iters):
             torch.cuda.empty_cache()
 
     # sample a batch of data
-    if isinstance(attention_type, list) and 'mamba' in attention_type or attention_type == 'mamba':
+    if isinstance(config['attention_type'], list) and 'mamba' in config['attention_type'] or config['attention_type'] == 'mamba':
         xb, yb, loader_state = train_loader.get_book_sequential_batch(loader_state)
         # Check for new book starts to reset states
         if model_states is not None:
