@@ -249,14 +249,15 @@ class DataLoader:
         batch_x = torch.zeros((self.batch_size, self.block_size), dtype=torch.long, device=self.device)
         batch_y = torch.zeros((self.batch_size, self.block_size), dtype=torch.long, device=self.device)
         for i in range(self.batch_size):
-            offset, length, pos, new_book = state[i]
+            offset, length, pos, _ = state[i]
+            this_is_new_book = False
             if pos + self.block_size + 1 >= length:
                 offset, length = self.get_random_book_start_and_length(split=split)
                 pos = 0
-                state[i] = (offset, length, pos, True)
+                this_is_new_book = True
             batch_x[i] = self.tensor_data[offset + pos:offset + pos + self.block_size]
             batch_y[i] = self.tensor_data[offset + pos + 1:offset + pos + 1 + self.block_size]
-            state[i] = (offset, length, pos + self.block_size, False)
+            state[i] = (offset, length, pos + self.block_size, this_is_new_book)
         
         # Move the batch to the correct device
         batch_x, batch_y = batch_x.to(self.device), batch_y.to(self.device)
